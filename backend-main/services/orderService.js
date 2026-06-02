@@ -1285,10 +1285,12 @@ const getOrderTrackerData = async (filters = {}) => {
     where.createdAt = { gte: start, lte: end };
   }
 
-  const maxResults = filters.limit ? parseInt(filters.limit) : 5000;
+  const maxResults = filters.limit ? parseInt(filters.limit) : 500;
   const orderItemFilter = {
     order: where,
   };
+  const page = filters.page ? Math.max(1, parseInt(filters.page)) : 1;
+  const skip = (page - 1) * maxResults;
 
   if (productId) {
     orderItemFilter.productId = parseInt(productId);
@@ -1311,7 +1313,8 @@ const getOrderTrackerData = async (filters = {}) => {
       },
     },
     orderBy: { order: { createdAt: "desc" } },
-    take: Math.min(5000, Math.max(1, maxResults)),
+    skip,
+    take: Math.min(1000, Math.max(1, maxResults)),
   });
 
   const orderIds = orderItems.map((item) => item.orderId);
