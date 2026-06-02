@@ -1,6 +1,7 @@
 const { PrismaClient } = require('@prisma/client');
 
 // Retry helper for connection pool timeout errors
+// Increased to 3 to handle transient connection failures gracefully
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
 const RETRYABLE_CODES = ['P2024', 'P1017', 'P1001', 'P1008'];

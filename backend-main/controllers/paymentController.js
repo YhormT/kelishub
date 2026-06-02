@@ -23,7 +23,18 @@ const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
       const existingOrder = await tx.order.findUnique({
         where: { id: transaction.orderId }
       });
-      return { created: false, alreadyExists: true, orderId: transaction.orderId, order: existingOrder };
+      
+      // Handle orphaned orderId (order was deleted but reference remained)
+      if (!existingOrder) {
+        console.warn(`[createOrderIfNotExists] Orphaned orderId ${transaction.orderId} found in PaymentTransaction ${externalRef}. Order was likely deleted. Clearing reference.`);
+        await tx.paymentTransaction.update({
+          where: { externalRef },
+          data: { orderId: null }
+        });
+        // Continue to create a new order below
+      } else {
+        return { created: false, alreadyExists: true, orderId: transaction.orderId, order: existingOrder };
+      }
     }
 
     // Get the product
