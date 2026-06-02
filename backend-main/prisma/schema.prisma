@@ -84,15 +84,16 @@ model Product {
 }
 
 model Order {
-  id           Int         @id @default(autoincrement())
-  userId       Int
-  createdAt    DateTime    @default(now())
-  status       String      @default("Pending")
-  mobileNumber String?
-  batchId      Int?
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  batch        OrderBatch? @relation(fields: [batchId], references: [id])
-  items        OrderItem[]
+  id                  Int                   @id @default(autoincrement())
+  userId              Int
+  createdAt           DateTime              @default(now())
+  status              String                @default("Pending")
+  mobileNumber        String?
+  batchId             Int?
+  user                User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batch               OrderBatch?           @relation(fields: [batchId], references: [id])
+  items               OrderItem[]
+  paymentTransactions PaymentTransaction[]
 
   @@index([userId])
   @@index([userId, createdAt])
@@ -155,6 +156,8 @@ model TopUp {
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
   @@map("TopUp")
 }
 
@@ -194,6 +197,10 @@ model Transaction {
   user            User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_user_transaction")
 
   @@index([userId])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([createdAt])
+  @@index([reference], map: "Transaction_reference_idx")
   @@map("Transaction")
 }
 
@@ -240,6 +247,7 @@ model Complaint {
 
   @@index([status])
   @@index([createdAt])
+  @@index([mobileNumber])
   @@map("Complaint")
 }
 
@@ -271,10 +279,12 @@ model PaymentTransaction {
   moolreSessionId  String?  @db.VarChar(255)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @default(now()) @updatedAt
+  order            Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
 
   @@index([externalRef], map: "PaymentTransaction_externalRef_idx")
   @@index([mobileNumber], map: "PaymentTransaction_mobileNumber_idx")
   @@index([status], map: "PaymentTransaction_status_idx")
+  @@index([orderId], map: "PaymentTransaction_orderId_idx")
   @@map("PaymentTransaction")
 }
 
@@ -322,6 +332,7 @@ model ReferralOrder {
   @@index([paymentRef], map: "ReferralOrder_paymentRef_idx")
   @@index([paymentStatus], map: "ReferralOrder_paymentStatus_idx")
   @@index([orderStatus])
+  @@index([orderId], map: "ReferralOrder_orderId_idx")
   @@index([createdAt])
   @@map("ReferralOrder")
 }

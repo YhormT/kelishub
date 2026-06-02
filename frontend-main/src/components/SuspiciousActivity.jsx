@@ -21,7 +21,8 @@ const getAuthHeaders = () => ({
 });
 
 const formatGHS = (amount) => {
-  const num = typeof amount === "number" ? amount : parseFloat(amount) || 0;
+  const num = typeof amount === "number" ? amount : parseFloat(amount);
+  if (Number.isNaN(num)) return "N/A";
   return `GHS ${num.toLocaleString("en-GH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 };
 
@@ -266,7 +267,7 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
                                   Agent
                                 </p>
                                 <p className="text-white text-sm font-medium">
-                                  {alert.agentName}
+                                  {alert.agentName || "N/A"}
                                 </p>
                               </div>
                             </div>
@@ -389,7 +390,7 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
                             #{alert.orderId}
                           </span>
                           <span className="text-dark-400">
-                            {alert.agentName}
+                            {alert.agentName || "N/A"}
                           </span>
                           <span className="text-dark-500">{alert.product}</span>
                           <span className="text-dark-500">
