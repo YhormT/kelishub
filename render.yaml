@@ -69,6 +69,30 @@ services:
         source: /shop
         destination: /index.html
       - type: rewrite
+        source: /admin
+        destination: /index.html
+      - type: rewrite
+        source: /admin/*
+        destination: /index.html
+      - type: rewrite
+        source: /user
+        destination: /index.html
+      - type: rewrite
+        source: /premium
+        destination: /index.html
+      - type: rewrite
+        source: /superagent
+        destination: /index.html
+      - type: rewrite
+        source: /normalagent
+        destination: /index.html
+      - type: rewrite
+        source: /otherdashboard
+        destination: /index.html
+      - type: rewrite
+        source: /profile
+        destination: /index.html
+      - type: rewrite
         source: /store/*
         destination: /index.html
       - type: rewrite
