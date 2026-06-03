@@ -90,13 +90,7 @@ const OrderTracker = ({ isOpen, onClose, onFraudDetected }) => {
   const [fraudAlerts, setFraudAlerts] = useState([]);
   const [agents, setAgents] = useState([]);
   const [products, setProducts] = useState([]);
-  const [resolvedIds, setResolvedIds] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("resolvedFraudAlerts") || "[]");
-    } catch {
-      return [];
-    }
-  });
+  const [resolvedIds, setResolvedIds] = useState([]);
 
   const [selectedAgent, setSelectedAgent] = useState("");
   const [agentSearch, setAgentSearch] = useState("");
@@ -167,15 +161,13 @@ const OrderTracker = ({ isOpen, onClose, onFraudDetected }) => {
           },
         );
         const allAlerts = res.data.fraudAlerts || [];
+        const serverResolvedIds = Array.isArray(res.data.resolvedIds)
+          ? res.data.resolvedIds
+          : [];
         setFraudAlerts(allAlerts);
-
-        // Filter out resolved alerts
-        const resolvedList = JSON.parse(
-          localStorage.getItem("resolvedFraudAlerts") || "[]",
-        );
-        setResolvedIds(resolvedList);
+        setResolvedIds(serverResolvedIds);
         const activeAlerts = allAlerts.filter(
-          (a) => !resolvedList.includes(`${a.orderId}-${a.itemId}`),
+          (a) => !serverResolvedIds.includes(`${a.orderId}-${a.itemId}`),
         );
 
         if (

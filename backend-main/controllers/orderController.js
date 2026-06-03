@@ -11,6 +11,7 @@ const {
   downloadOrdersForExcel,
   getOrderTrackerData,
   cancelOrderItem,
+  resolveAlert,
 } = require("../services/orderService");
 
 const orderService = require("../services/orderService");
@@ -885,11 +886,23 @@ exports.getOrderTracker = async (req, res) => {
       endTime,
       limit,
       page,
+      userId: req.user?.id,
     });
     res.json({ success: true, ...result });
   } catch (error) {
     console.error("Error in getOrderTracker:", error);
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.resolveAlert = async (req, res) => {
+  try {
+    const { orderId, itemId } = req.body;
+    const result = await resolveAlert(req.user?.id, orderId, itemId);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error("Error in resolveAlert:", error);
+    res.status(400).json({ success: false, message: error.message });
   }
 };
 

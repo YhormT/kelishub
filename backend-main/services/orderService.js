@@ -1249,8 +1249,41 @@ const downloadOrdersForExcel = async ({
   return { items, updatedCount, totalItems: items.length };
 };
 
+const getResolvedAlertKeys = async (userId) => {
+  if (!userId) return [];
+  const rows = await prisma.fraudAlertResolution.findMany({
+    where: { userId: parseInt(userId) },
+    select: { orderId: true, itemId: true },
+  });
+  return rows.map((row) => `${row.orderId}-${row.itemId}`);
+};
+
+const resolveAlert = async (userId, orderId, itemId) => {
+  if (!userId || !orderId || !itemId) {
+    throw new Error("userId, orderId and itemId are required");
+  }
+
+  await prisma.fraudAlertResolution.upsert({
+    where: {
+      userId_orderId_itemId: {
+        userId: parseInt(userId),
+        orderId: parseInt(orderId),
+        itemId: parseInt(itemId),
+      },
+    },
+    create: {
+      userId: parseInt(userId),
+      orderId: parseInt(orderId),
+      itemId: parseInt(itemId),
+    },
+    update: {},
+  });
+
+  return { resolved: true, key: `${orderId}-${itemId}` };
+};
+
 const getOrderTrackerData = async (filters = {}) => {
-  const { agentId, productId, startDate, endDate, startTime, endTime } =
+  const { agentId, productId, startDate, endDate, startTime, endTime, userId } =
     filters;
   const where = {};
 
@@ -1295,6 +1328,8 @@ const getOrderTrackerData = async (filters = {}) => {
   if (productId) {
     orderItemFilter.productId = parseInt(productId);
   }
+
+  const resolvedIds = await getResolvedAlertKeys(userId);
 
   const orderItems = await prisma.orderItem.findMany({
     where: orderItemFilter,
@@ -1406,6 +1441,11 @@ const getOrderTrackerData = async (filters = {}) => {
       order.mobileNumber ||
       "N/A";
 
+    const isExternalApiOrder =
+      order.user?.role === "external_partner" ||
+      order.user?.email?.includes("partner_") ||
+      order.user?.email?.includes("@external.api");
+
     const row = {
       agentName,
       agentId: order.user?.id || null,
@@ -1426,6 +1466,10 @@ const getOrderTrackerData = async (filters = {}) => {
     tableData.push(row);
 
     // Fraud detection logic
+    if (isExternalApiOrder) {
+      continue;
+    }
+
     if (isStorefrontOrder) {
       // Storefront order paid via Paystack — only flag if payment was NOT verified
       if (referral.paymentStatus !== "Paid") {
@@ -1448,7 +1492,7 @@ const getOrderTrackerData = async (filters = {}) => {
     }
   }
 
-  return { tableData, networkSummary, fraudAlerts };
+  return { tableData, networkSummary, fraudAlerts, resolvedIds };
 };
 
 const cancelOrderItem = async (userId, orderItemId) => {
@@ -1500,6 +1544,8 @@ module.exports = {
   updateSingleOrderItemStatus,
   downloadOrdersForExcel,
   getOrderTrackerData,
+  getResolvedAlertKeys,
+  resolveAlert,
   cancelOrderItem,
   createDirectOrder: orderService.createDirectOrder,
   getOrdersByIds: orderService.getOrdersByIds,
