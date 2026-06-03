@@ -43,6 +43,7 @@ model User {
   commissionPayouts  CommissionPayout[]  @relation("AgentPayouts")
   commissionRequests CommissionRequest[] @relation("AgentCommissionRequests")
   fraudAlertResolutions FraudAlertResolution[]
+  externalApiKeys      ExternalApiKey[]
 
   @@map("User")
 }
@@ -478,4 +479,7 @@ model ExternalApiKey {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
   agentId      Int?
+  agent        User?     @relation(fields: [agentId], references: [id], onDelete: SetNull)
+
+  @@index([agentId])
 }

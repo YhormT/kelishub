@@ -1,8 +1,30 @@
+const fs = require('fs');
 const externalApiService = require('../services/externalApiService');
 
-// ==================== PARTNER ENDPOINTS ====================
+const emitBalanceUpdate = async (req, agentId) => {
+  try {
+    const prisma = require('../config/db');
+    const { io, userSockets } = require('../index');
+    const user = await prisma.user.findUnique({
+      where: { id: agentId },
+      select: { loanBalance: true, adminLoanBalance: true, hasLoan: true },
+    });
+    if (user && io && userSockets) {
+      const socketId = userSockets.get(String(agentId)) || userSockets.get(agentId);
+      if (socketId) {
+        io.to(socketId).emit('balance-updated', {
+          loanBalance: user.loanBalance,
+          adminLoanBalance: user.adminLoanBalance,
+          hasLoan: user.hasLoan,
+          type: 'ORDER',
+        });
+      }
+    }
+  } catch (e) {
+    /* best-effort */
+  }
+};
 
-// GET /api/external/products - List available products
 exports.getProducts = async (req, res) => {
   try {
     const products = await externalApiService.getAvailableProducts();
@@ -13,7 +35,6 @@ exports.getProducts = async (req, res) => {
   }
 };
 
-// POST /api/external/orders - Place an order
 exports.createOrder = async (req, res) => {
   try {
     const { items } = req.body;
@@ -21,57 +42,126 @@ exports.createOrder = async (req, res) => {
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'items array is required and must not be empty. Each item needs: productId, quantity, mobileNumber'
+        message:
+          'items array is required and must not be empty. Each item needs: productId, quantity, mobileNumber',
       });
     }
 
-    // Validate each item
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (!item.productId) {
         return res.status(400).json({
           success: false,
-          message: `Item at index ${i} is missing productId`
+          message: `Item at index ${i} is missing productId`,
         });
       }
       if (!item.quantity || parseInt(item.quantity) < 1) {
         return res.status(400).json({
           success: false,
-          message: `Item at index ${i} has invalid quantity`
+          message: `Item at index ${i} has invalid quantity`,
         });
       }
       if (!item.mobileNumber) {
         return res.status(400).json({
           success: false,
-          message: `Item at index ${i} is missing mobileNumber`
+          message: `Item at index ${i} is missing mobileNumber`,
         });
       }
     }
 
     const order = await externalApiService.createExternalOrder(req.partner.id, items);
+    await emitBalanceUpdate(req, req.partner.agentId);
 
-    // Emit real-time notification to admin
     try {
       const io = req.app.get('io');
-      if (io) io.emit('new-order', { orderId: order.orderId, partner: req.partner.name, itemCount: items.length });
-    } catch (e) { /* socket emit is best-effort */ }
+      if (io) {
+        io.emit('new-order', {
+          orderId: order.orderId,
+          partner: req.partner.name,
+          agentId: req.partner.agentId,
+          itemCount: items.length,
+        });
+      }
+    } catch (e) {
+      /* best-effort */
+    }
 
     res.status(201).json({
       success: true,
-      message: 'Order placed successfully',
-      data: order
+      message: 'Order placed successfully. Wallet debited.',
+      data: order,
     });
   } catch (error) {
     console.error('External API - createOrder error:', error);
-    res.status(400).json({ success: false, message: error.message });
+    const status = error.message?.includes('Insufficient') ? 402 : 400;
+    res.status(status).json({ success: false, message: error.message });
   }
 };
 
-// GET /api/external/orders/:orderId - Check order status
+exports.createFileOrder = async (req, res) => {
+  const filePath = req.file?.path;
+  try {
+    if (!filePath) {
+      return res.status(400).json({ success: false, message: 'orderFile is required (Excel upload).' });
+    }
+
+    const networkProvider =
+      req.body.network_provider || req.body.networkProvider || req.body.network;
+
+    const order = await externalApiService.createExternalFileOrder(
+      req.partner.id,
+      filePath,
+      networkProvider
+    );
+
+    await emitBalanceUpdate(req, req.partner.agentId);
+
+    try {
+      const io = req.app.get('io');
+      if (io) {
+        io.emit('new-order', {
+          orderId: order.orderId,
+          partner: req.partner.name,
+          agentId: req.partner.agentId,
+          itemCount: order.itemCount,
+          source: 'gmpl-file',
+        });
+      }
+    } catch (e) {
+      /* best-effort */
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Order file submitted. Wallet debited and sent to data provider.',
+      data: order,
+    });
+  } catch (error) {
+    console.error('External API - createFileOrder error:', error);
+    if (error.validationErrors) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+        errors: error.validationErrors,
+      });
+    }
+    const status = error.message?.includes('Insufficient') ? 402 : 400;
+    res.status(status).json({ success: false, message: error.message });
+  } finally {
+    if (filePath) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }
+};
+
 exports.getOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const order = await externalApiService.getExternalOrderStatus(orderId);
+    const order = await externalApiService.getExternalOrderStatus(orderId, req.partner.id);
     res.json({ success: true, data: order });
   } catch (error) {
     console.error('External API - getOrderStatus error:', error);
@@ -79,7 +169,6 @@ exports.getOrderStatus = async (req, res) => {
   }
 };
 
-// POST /api/external/orders/status - Check multiple order statuses
 exports.getOrderStatuses = async (req, res) => {
   try {
     const { orderIds } = req.body;
@@ -87,18 +176,18 @@ exports.getOrderStatuses = async (req, res) => {
     if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'orderIds array is required'
+        message: 'orderIds array is required',
       });
     }
 
     if (orderIds.length > 50) {
       return res.status(400).json({
         success: false,
-        message: 'Maximum 50 order IDs per request'
+        message: 'Maximum 50 order IDs per request',
       });
     }
 
-    const orders = await externalApiService.getExternalOrderStatuses(orderIds);
+    const orders = await externalApiService.getExternalOrderStatuses(orderIds, req.partner.id);
     res.json({ success: true, data: orders });
   } catch (error) {
     console.error('External API - getOrderStatuses error:', error);
@@ -106,34 +195,47 @@ exports.getOrderStatuses = async (req, res) => {
   }
 };
 
-// ==================== ADMIN ENDPOINTS ====================
-
-// POST /api/external/admin/keys - Generate new API key
 exports.createApiKey = async (req, res) => {
   try {
-    const { partnerName } = req.body;
+    const { partnerName, agentId } = req.body;
 
     if (!partnerName || partnerName.trim().length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'partnerName is required'
+        message: 'partnerName is required',
       });
     }
 
-    const result = await externalApiService.createApiKey(partnerName.trim());
+    if (!agentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'agentId is required — select the agent this key belongs to',
+      });
+    }
+
+    const result = await externalApiService.createApiKey(partnerName.trim(), agentId);
 
     res.status(201).json({
       success: true,
-      message: 'API key created. Share this key with your partner. It will only be shown once.',
-      data: result
+      message: `API key created for agent ${result.agentName}. Share this key once — orders debit their wallet.`,
+      data: result,
     });
   } catch (error) {
     console.error('External API - createApiKey error:', error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.listAgents = async (req, res) => {
+  try {
+    const agents = await externalApiService.listAgentsForApiKeys();
+    res.json({ success: true, data: agents });
+  } catch (error) {
+    console.error('External API - listAgents error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// GET /api/external/admin/keys - List all API keys
 exports.listApiKeys = async (req, res) => {
   try {
     const keys = await externalApiService.listApiKeys();
@@ -144,7 +246,6 @@ exports.listApiKeys = async (req, res) => {
   }
 };
 
-// PATCH /api/external/admin/keys/:id/revoke - Revoke an API key
 exports.revokeApiKey = async (req, res) => {
   try {
     const { id } = req.params;
@@ -156,7 +257,6 @@ exports.revokeApiKey = async (req, res) => {
   }
 };
 
-// PATCH /api/external/admin/keys/:id/activate - Reactivate an API key
 exports.activateApiKey = async (req, res) => {
   try {
     const { id } = req.params;
@@ -168,7 +268,6 @@ exports.activateApiKey = async (req, res) => {
   }
 };
 
-// DELETE /api/external/admin/keys/:id - Delete an API key permanently
 exports.deleteApiKey = async (req, res) => {
   try {
     const { id } = req.params;

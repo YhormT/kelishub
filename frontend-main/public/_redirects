@@ -1,2 +1,2 @@
-# SPA fallback — serve index.html for all client routes (Railway / CDN)
+# SPA fallback — serve index.html for all client routes (Render / CDN)
 /*    /index.html   200

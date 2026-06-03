@@ -29,7 +29,7 @@ yhorm_render/              # Repository root
 | Files | Multer + SheetJS (`xlsx`) for Excel orders |
 | Security | Helmet, CORS, rate limiter, AES-256-GCM chat encryption |
 
-**Production hosting:** [Railway](https://railway.app) — API at `https://yhormpro-production.up.railway.app`
+**Production hosting:** [Render](https://render.com) — [kellishub.com](https://kellishub.com) (Blueprint: `render.yaml`)
 
 ### Frontend (`frontend-main/`)
 
@@ -101,7 +101,7 @@ npm start      # runs: vite
 Dev server runs at **http://localhost:5173**. API base URL in `src/endpoints/endpoints.js`:
 
 ```js
-const BASE_URL = import.meta.env.VITE_API_URL || 'https://yhormpro-production.up.railway.app';
+const BASE_URL = import.meta.env.VITE_API_URL || 'https://kellishub.com';
 ```
 
 For local dev, set `VITE_API_URL=http://localhost:5000` in `frontend-main/.env.local`.
@@ -165,7 +165,7 @@ Migrations: `backend-main/prisma/migrations/` (MySQL; run `npx prisma migrate de
 | Top-ups | `/api` (topUp routes) | Wallet top-ups (Paystack + SMS) |
 | Transactions | `/api` (transaction routes) | Ledger, balance sheet |
 | Storefront | `/api/storefront` | Agent storefronts, referrals, commissions |
-| External API | `/api/external` | Partner integration via API keys |
+| External API | `/api/external` | Agent-linked API keys; orders debit wallet; file orders forward to GMPL (`GMPL_API_KEY`) |
 | Chat | `/api/chat` | Admin–agent messaging |
 | Shop chat | `/api/shop-chat` | Shop customer–admin messaging |
 | Announcements | `/api/announcement` | CRUD + audience targeting |
@@ -251,7 +251,7 @@ Migrations: `backend-main/prisma/migrations/` (MySQL; run `npx prisma migrate de
 |----------|-------------|
 | `VITE_API_URL` | Backend origin — **required on Render** at frontend build time (e.g. `https://your-api.onrender.com`) |
 
-If unset locally, `endpoints.js` uses `''` (same origin). Use `.env.local` for development.
+If unset locally, `endpoints.js` defaults to `https://kellishub.com`. Use `.env.local` with `VITE_API_URL=http://localhost:5000` for development.
 
 ---
 
@@ -275,7 +275,7 @@ Deploy **two services** plus a **Render MySQL** database from the root **`render
 | API | `kellishub-api` | Web Service (Node) | `https://kellishub-api.onrender.com` |
 | UI | `kellishub-web` | Static Site (Vite) | `https://kellishub-web.onrender.com` |
 
-If you rename services in Render, update `VITE_API_URL`, `FRONTEND_URL`, and `PAYSTACK_CALLBACK_URL` to match the new `*.onrender.com` hostnames.
+Custom domains (e.g. `kellishub.com`) are set in the Render Dashboard per service. Update `VITE_API_URL`, `FRONTEND_URL`, and `PAYSTACK_CALLBACK_URL` when those URLs change.
 
 ---
 
@@ -323,7 +323,7 @@ For manual setup, create a MySQL instance and set `DATABASE_URL` on the API serv
 | `FRONTEND_URL` | Yes | `https://<frontend-host>` |
 | `NODE_ENV` | Yes | `production` |
 
-### Frontend (Vercel, Netlify, or Railway static)
+### Frontend (Render static site or other host)
 
 | Variable | Required | Notes |
 |----------|----------|-------|
@@ -412,8 +412,8 @@ services:
 
 ### Post-deploy checklist
 
-1. `GET https://yhormpro-production.up.railway.app/health` → `{ "status": "ok", ... }`
-2. Frontend login and API calls reach the Railway API URL
+1. `GET https://kellishub.com/health` or `GET https://kellishub-api.onrender.com/health` → `{ "status": "ok", ... }`
+2. Frontend login and API calls reach the same origin as `VITE_API_URL`
 3. Paystack `PAYSTACK_CALLBACK_URL` and `FRONTEND_URL` match your live frontend host
 4. Socket.IO connects to the same host as `VITE_API_URL`
 
@@ -436,14 +436,14 @@ After changing rewrite rules, trigger a **manual deploy** of the static site.
 | `PAYSTACK_SECRET_KEY` | Paystack API secret |
 | `PAYSTACK_CALLBACK_URL` | Post-payment redirect |
 | `FRONTEND_URL` | Frontend origin for callbacks |
-| `PORT` | Server port (Railway sets automatically) |
+| `PORT` | Server port (Render sets automatically) |
 | `NODE_ENV` | `development` or `production` |
 
 ### Frontend
 
 | Variable | Description |
 |----------|-------------|
-| `VITE_API_URL` | Backend origin at build time; defaults to `https://yhormpro-production.up.railway.app` |
+| `VITE_API_URL` | Backend origin at build time; defaults to `https://kellishub.com` |
 
 ---
 

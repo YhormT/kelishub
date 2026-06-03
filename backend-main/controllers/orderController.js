@@ -429,19 +429,17 @@ exports.updateSingleOrderItemStatus = async (req, res) => {
         }
       }
 
-      // Check wallet balance
-      if (productsToAdd.length > 0 && agent.walletBalance !== undefined) {
-        if (agent.walletBalance < totalCost) {
-          errorReport.push({
-            row: "ALL",
-            errors: [
-              "Insufficient wallet balance for total order. Required: " +
-                totalCost +
-                ", Available: " +
-                agent.walletBalance,
-            ],
-          });
-        }
+      // Check agent wallet balance (loanBalance)
+      if (productsToAdd.length > 0 && agent.loanBalance < totalCost) {
+        errorReport.push({
+          row: "ALL",
+          errors: [
+            "Insufficient wallet balance for total order. Required: GHS " +
+              totalCost.toFixed(2) +
+              ", Available: GHS " +
+              agent.loanBalance.toFixed(2),
+          ],
+        });
       }
 
       // If any errors, do not add to cart
@@ -647,6 +645,23 @@ exports.uploadSimplifiedExcelOrders = async (req, res) => {
           failed: errorReport.length,
         },
         errors: errorReport,
+      });
+    }
+
+    const productService = require("../services/productService");
+    let totalCost = 0;
+    for (const item of productsToAdd) {
+      const unitPrice =
+        productService.getPriceForUserRole(userRole, item.product) ??
+        item.product.price;
+      totalCost += unitPrice * item.quantity;
+    }
+
+    if (agent.loanBalance < totalCost) {
+      fs.unlinkSync(filePath);
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient wallet balance. Required: GHS ${totalCost.toFixed(2)}, available: GHS ${agent.loanBalance.toFixed(2)}`,
       });
     }
 

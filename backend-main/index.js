@@ -37,7 +37,7 @@ const io = new Server(server, {
 
 const userSockets = new Map();        // userId -> socketId
 const socketUsers = new Map();        // socketId -> userId (reverse map for O(1) disconnect)
-const MAX_SOCKET_CONNECTIONS = 500; // Limit for Railway memory constraints
+const MAX_SOCKET_CONNECTIONS = 500; // Limit for Render starter plan memory
 
 io.on('connection', (socket) => {
   // Limit total connections to prevent memory issues
@@ -152,12 +152,12 @@ app.use(express.json());
 app.use(cors());
 app.use(helmet());
 
-// Root route for Railway health check
+// Root route for Render / load balancer health check
 app.get('/', (req, res) => {
   res.status(200).json({ app: 'kellishub API', status: 'running', docs: '/health' });
 });
 
-// Health check endpoint for Railway
+// Health check endpoint (render.yaml healthCheckPath: /health)
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
