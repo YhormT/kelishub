@@ -37,9 +37,13 @@ services:
       - key: PAYSTACK_SECRET_KEY
         sync: false
       - key: PAYSTACK_CALLBACK_URL
-        value: https://kellishub-web.onrender.com/shop
+        value: https://kellishub.com/shop
       - key: FRONTEND_URL
-        value: https://kellishub-web.onrender.com
+        value: https://kellishub.com
+      - key: GMPL_API_URL
+        value: https://api.gmpl.com
+      - key: GMPL_API_KEY
+        sync: false
 
   # ── Frontend (Vite static site) ───────────────────────────────────────
   - type: web
@@ -65,12 +69,36 @@ services:
         source: /shop
         destination: /index.html
       - type: rewrite
+        source: /admin
+        destination: /index.html
+      - type: rewrite
+        source: /admin/*
+        destination: /index.html
+      - type: rewrite
+        source: /user
+        destination: /index.html
+      - type: rewrite
+        source: /premium
+        destination: /index.html
+      - type: rewrite
+        source: /superagent
+        destination: /index.html
+      - type: rewrite
+        source: /normalagent
+        destination: /index.html
+      - type: rewrite
+        source: /otherdashboard
+        destination: /index.html
+      - type: rewrite
+        source: /profile
+        destination: /index.html
+      - type: rewrite
         source: /store/*
         destination: /index.html
       - type: rewrite
         source: /*
         destination: /index.html
     envVars:
-      # Must match public URL of kellishub-api (https://<service-name>.onrender.com)
+      # Backend origin at build time (custom domain or https://kellishub-api.onrender.com)
       - key: VITE_API_URL
-        value: https://kellishub-api.onrender.com
+        value: https://kellishub.com

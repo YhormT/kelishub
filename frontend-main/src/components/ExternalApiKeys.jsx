@@ -6,9 +6,12 @@ import BASE_URL from '../endpoints/endpoints';
 
 const ExternalApiKeys = ({ isOpen, onClose }) => {
   const [apiKeys, setApiKeys] = useState([]);
+  const [agents, setAgents] = useState([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [partnerName, setPartnerName] = useState('');
+  const [agentSearch, setAgentSearch] = useState('');
+  const [selectedAgentId, setSelectedAgentId] = useState('');
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newlyCreatedKey, setNewlyCreatedKey] = useState(null);
   const [copiedKeyId, setCopiedKeyId] = useState(null);
@@ -29,34 +32,75 @@ const ExternalApiKeys = ({ isOpen, onClose }) => {
     }
   }, []);
 
+  const fetchAgents = useCallback(async () => {
+    try {
+      const res = await axios.get(`${BASE_URL}/api/external/admin/agents`, { headers: getHeaders() });
+      setAgents(res.data?.data || []);
+    } catch (error) {
+      console.error('Error fetching agents:', error);
+    }
+  }, []);
+
   useEffect(() => {
     if (isOpen) {
       fetchApiKeys();
+      fetchAgents();
       setNewlyCreatedKey(null);
       setShowCreateForm(false);
       setPartnerName('');
+      setAgentSearch('');
+      setSelectedAgentId('');
     }
-  }, [isOpen, fetchApiKeys]);
+  }, [isOpen, fetchApiKeys, fetchAgents]);
 
   const handleCreate = async () => {
     if (!partnerName.trim()) {
-      Swal.fire({ icon: 'error', title: 'Error', text: 'Partner name is required', background: '#1e293b', color: '#f1f5f9' });
+      Swal.fire({ icon: 'error', title: 'Error', text: 'Label / partner name is required', background: '#1e293b', color: '#f1f5f9' });
+      return;
+    }
+    if (!selectedAgentId) {
+      Swal.fire({ icon: 'error', title: 'Error', text: 'Select an agent — orders will debit their wallet', background: '#1e293b', color: '#f1f5f9' });
       return;
     }
     setCreating(true);
     try {
-      const res = await axios.post(`${BASE_URL}/api/external/admin/keys`, { partnerName: partnerName.trim() }, { headers: getHeaders() });
+      const res = await axios.post(
+        `${BASE_URL}/api/external/admin/keys`,
+        { partnerName: partnerName.trim(), agentId: parseInt(selectedAgentId, 10) },
+        { headers: getHeaders() }
+      );
       setNewlyCreatedKey(res.data?.data);
       setPartnerName('');
+      setSelectedAgentId('');
+      setAgentSearch('');
       setShowCreateForm(false);
       fetchApiKeys();
-      Swal.fire({ icon: 'success', title: 'API Key Created!', text: 'Copy the key now — it won\'t be shown again.', background: '#1e293b', color: '#f1f5f9' });
+      Swal.fire({
+        icon: 'success',
+        title: 'API Key Created!',
+        text: `Linked to ${res.data?.data?.agentName}. Orders debit their wallet. Copy the key now.`,
+        background: '#1e293b',
+        color: '#f1f5f9',
+      });
     } catch (error) {
       Swal.fire({ icon: 'error', title: 'Error', text: error.response?.data?.message || 'Failed to create API key', background: '#1e293b', color: '#f1f5f9' });
     } finally {
       setCreating(false);
     }
   };
+
+  const filteredAgents = agents.filter((a) => {
+    const q = agentSearch.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      a.name?.toLowerCase().includes(q) ||
+      a.email?.toLowerCase().includes(q) ||
+      String(a.phone || '').includes(q) ||
+      a.role?.toLowerCase().includes(q)
+    );
+  });
+
+  const selectedAgent = agents.find((a) => String(a.id) === String(selectedAgentId));
 
   const handleRevoke = async (id, name) => {
     const result = await Swal.fire({
@@ -131,7 +175,7 @@ const ExternalApiKeys = ({ isOpen, onClose }) => {
             <Key className="w-6 h-6 text-white" />
             <div>
               <h2 className="text-lg font-bold text-white">External API Keys</h2>
-              <p className="text-white/70 text-xs">Manage partner API access for order integration</p>
+              <p className="text-white/70 text-xs">Each key is tied to one agent wallet — no balance, no orders</p>
             </div>
           </div>
           <button onClick={onClose} className="p-2 bg-white/20 hover:bg-white/30 rounded-lg transition-colors">
@@ -181,26 +225,61 @@ const ExternalApiKeys = ({ isOpen, onClose }) => {
 
           {/* Create Form */}
           {showCreateForm && (
-            <div className="bg-dark-900 border border-dark-600 rounded-xl p-4">
-              <h3 className="text-white font-semibold mb-3">Generate API Key for Partner</h3>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Partner name (e.g. Friend's Website)"
-                  value={partnerName}
-                  onChange={(e) => setPartnerName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                  className="flex-1 bg-dark-800 border border-dark-600 rounded-xl px-4 py-2.5 text-white placeholder-dark-500 focus:border-violet-500 focus:outline-none text-sm"
-                />
-                <button
-                  onClick={handleCreate}
-                  disabled={creating}
-                  className="px-4 py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-xl text-sm font-medium hover:from-violet-600 hover:to-purple-600 disabled:opacity-50 flex items-center gap-2"
-                >
-                  {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Key className="w-4 h-4" />}
-                  {creating ? 'Creating...' : 'Create'}
-                </button>
+            <div className="bg-dark-900 border border-dark-600 rounded-xl p-4 space-y-3">
+              <h3 className="text-white font-semibold">Generate API Key for Agent</h3>
+              <p className="text-dark-400 text-xs">Search by name, pick the agent, then create the key. All API orders debit that agent&apos;s wallet.</p>
+              <input
+                type="text"
+                placeholder="Search agent by name, email, or phone..."
+                value={agentSearch}
+                onChange={(e) => setAgentSearch(e.target.value)}
+                className="w-full bg-dark-800 border border-dark-600 rounded-xl px-4 py-2.5 text-white placeholder-dark-500 focus:border-violet-500 focus:outline-none text-sm"
+              />
+              <div className="max-h-40 overflow-y-auto border border-dark-700 rounded-xl divide-y divide-dark-700">
+                {filteredAgents.length === 0 ? (
+                  <p className="text-dark-500 text-sm p-3">No agents match your search.</p>
+                ) : (
+                  filteredAgents.map((agent) => (
+                    <button
+                      key={agent.id}
+                      type="button"
+                      onClick={() => setSelectedAgentId(String(agent.id))}
+                      className={`w-full text-left px-3 py-2.5 text-sm transition-colors ${
+                        String(selectedAgentId) === String(agent.id)
+                          ? 'bg-violet-500/20 text-white'
+                          : 'text-dark-300 hover:bg-dark-800'
+                      }`}
+                    >
+                      <span className="font-medium text-white">{agent.name}</span>
+                      <span className="text-dark-500 ml-2">({agent.role})</span>
+                      <span className="block text-xs text-dark-500">
+                        Wallet: GHS {Math.abs(agent.loanBalance || 0).toFixed(2)} · {agent.email}
+                      </span>
+                    </button>
+                  ))
+                )}
               </div>
+              {selectedAgent && (
+                <p className="text-emerald-400/90 text-xs">
+                  Selected: <strong>{selectedAgent.name}</strong> — wallet GHS {Math.abs(selectedAgent.loanBalance || 0).toFixed(2)}
+                </p>
+              )}
+              <input
+                type="text"
+                placeholder="Key label (e.g. Partner integration name)"
+                value={partnerName}
+                onChange={(e) => setPartnerName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
+                className="w-full bg-dark-800 border border-dark-600 rounded-xl px-4 py-2.5 text-white placeholder-dark-500 focus:border-violet-500 focus:outline-none text-sm"
+              />
+              <button
+                onClick={handleCreate}
+                disabled={creating || !selectedAgentId}
+                className="w-full py-2.5 bg-gradient-to-r from-violet-500 to-purple-500 text-white rounded-xl text-sm font-medium hover:from-violet-600 hover:to-purple-600 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Key className="w-4 h-4" />}
+                {creating ? 'Creating...' : 'Create API Key'}
+              </button>
             </div>
           )}
 
@@ -218,6 +297,7 @@ const ExternalApiKeys = ({ isOpen, onClose }) => {
                 <div>
                   <p className="text-white font-medium mb-1">Authentication:</p>
                   <p>Include header: <code className="bg-dark-800 text-violet-300 px-2 py-1 rounded text-xs">x-api-key: YOUR_API_KEY</code></p>
+                  <p className="text-amber-400/90 text-xs mt-1">Orders always debit the linked agent&apos;s wallet. Insufficient balance returns HTTP 402.</p>
                 </div>
                 <div>
                   <p className="text-white font-medium mb-2">Endpoints:</p>
@@ -289,7 +369,25 @@ const ExternalApiKeys = ({ isOpen, onClose }) => {
   }
 }`}</pre>
                           </div>
-                          <p className="text-amber-400/80 text-xs">Save the orderId to check status later.</p>
+                          <p className="text-amber-400/80 text-xs">Save the orderId to check status later. Wallet is charged immediately.</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* POST /orders/file */}
+                    <div className="bg-dark-800 rounded-lg overflow-hidden">
+                      <button onClick={() => setExpandedEndpoint(expandedEndpoint === 'orders-file' ? null : 'orders-file')} className="w-full p-2.5 flex items-center gap-2 hover:bg-dark-700/50 transition-colors">
+                        {expandedEndpoint === 'orders-file' ? <ChevronDown className="w-3.5 h-3.5 text-dark-400" /> : <ChevronRight className="w-3.5 h-3.5 text-dark-400" />}
+                        <span className="bg-blue-500/20 text-blue-400 text-xs font-mono px-2 py-0.5 rounded">POST</span>
+                        <code className="text-dark-200 text-xs">/orders/file</code>
+                        <span className="text-dark-500 text-xs ml-auto">Excel → GMPL</span>
+                      </button>
+                      {expandedEndpoint === 'orders-file' && (
+                        <div className="px-3 pb-3 pt-0 border-t border-dark-700 space-y-2">
+                          <p className="text-dark-400 text-xs mt-2">Upload simplified Excel (phone + bundle GB). Debits wallet, forwards to data provider.</p>
+                          <pre className="bg-dark-900 text-blue-300 text-xs p-2 rounded overflow-x-auto">{`multipart/form-data:
+  orderFile: (Excel .xlsx)
+  network_provider: mtn | telecel | airteltigo`}</pre>
                         </div>
                       )}
                     </div>
@@ -395,6 +493,14 @@ const ExternalApiKeys = ({ isOpen, onClose }) => {
                           {key.isActive ? 'Active' : 'Revoked'}
                         </span>
                       </div>
+                      {key.agentName ? (
+                        <p className="text-violet-300/90 text-xs mb-1">
+                          Agent: {key.agentName}
+                          {key.agentBalance != null && ` · Wallet GHS ${Math.abs(key.agentBalance).toFixed(2)}`}
+                        </p>
+                      ) : (
+                        <p className="text-amber-400 text-xs mb-1">No agent linked — revoke and recreate this key</p>
+                      )}
                       <div className="flex items-center gap-1 mb-2">
                         <code className="text-dark-400 text-xs font-mono">{key.apiKeyPreview}</code>
                       </div>

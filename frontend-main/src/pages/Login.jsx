@@ -4,6 +4,7 @@ import { Eye, EyeOff, ArrowRight, Mail, Lock, Shield, Zap, Wifi } from "lucide-r
 import { motion } from "framer-motion";
 import axios from "axios";
 import BASE_URL from "../endpoints/endpoints";
+import { getStoredAuth, persistAuth, dashboardPathForRole } from "../utils/auth";
 import { toast } from "react-toastify";
 import { Dialog } from "@headlessui/react";
 
@@ -19,26 +20,12 @@ const Login = () => {
   const [showFaqModal, setShowFaqModal] = useState(false);
   const navigate = useNavigate();
 
-  const redirectToDashboard = (role) => {
-    switch (role) {
-      case "ADMIN": navigate("/admin"); break;
-      case "USER": navigate("/user"); break;
-      case "PREMIUM": navigate("/premium"); break;
-      case "SUPER": navigate("/superagent"); break;
-      case "NORMAL": navigate("/normalagent"); break;
-      case "OTHER": navigate("/otherdashboard"); break;
-      default: navigate("/login");
-    }
-  };
-
   useEffect(() => {
-    const storedRole = localStorage.getItem("role");
-    const token = localStorage.getItem("token");
-    if (storedRole && token) {
-      redirectToDashboard(storedRole);
+    const { token, role } = getStoredAuth();
+    if (token && role) {
+      navigate(dashboardPathForRole(role), { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [navigate]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -56,15 +43,8 @@ const Login = () => {
 
       const { token, user } = res.data;
 
-      localStorage.setItem("token", token);
-      localStorage.setItem("role", user.role);
-      localStorage.setItem("name", user.name);
-      localStorage.setItem("email", user.email);
-      localStorage.setItem("userId", user.id);
-      localStorage.setItem("isLoggedIn", true);
-      localStorage.setItem("isSuspended", user.isSuspended ? "true" : "false");
-
-      redirectToDashboard(user.role);
+      persistAuth(user, token);
+      navigate(dashboardPathForRole(user.role), { replace: true });
     } catch (err) {
       setLoading(false);
       if (err.response?.status === 403) {

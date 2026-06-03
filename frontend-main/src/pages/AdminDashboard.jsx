@@ -353,8 +353,11 @@ const AdminDashboard = () => {
   }, [fetchData, fetchFraudAlerts]);
 
   useEffect(() => {
-    const role = localStorage.getItem("role");
-    if (role !== "ADMIN") navigate("/");
+    const role = (localStorage.getItem("role") || "").trim().toUpperCase();
+    const token = localStorage.getItem("token");
+    if (!token || role !== "ADMIN") {
+      navigate("/login", { replace: true });
+    }
   }, [navigate]);
 
   // Close notification dropdown when clicking outside

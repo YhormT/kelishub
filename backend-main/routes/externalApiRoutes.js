@@ -1,17 +1,27 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const externalApiController = require('../controllers/externalApiController');
 const externalApiAuth = require('../middleware/externalApiAuth');
 const authMiddleware = require('../middleware/authMiddleware');
 const adminMiddleware = require('../middleware/adminMiddleware');
 
+const upload = multer({ dest: 'uploads/' });
+
 // ==================== PARTNER ENDPOINTS (API Key Auth) ====================
 router.get('/products', externalApiAuth, externalApiController.getProducts);
 router.post('/orders', externalApiAuth, externalApiController.createOrder);
+router.post(
+  '/orders/file',
+  externalApiAuth,
+  upload.single('orderFile'),
+  externalApiController.createFileOrder
+);
 router.get('/orders/:orderId', externalApiAuth, externalApiController.getOrderStatus);
 router.post('/orders/status', externalApiAuth, externalApiController.getOrderStatuses);
 
 // ==================== ADMIN ENDPOINTS (JWT Auth) ====================
+router.get('/admin/agents', authMiddleware, adminMiddleware, externalApiController.listAgents);
 router.post('/admin/keys', authMiddleware, adminMiddleware, externalApiController.createApiKey);
 router.get('/admin/keys', authMiddleware, adminMiddleware, externalApiController.listApiKeys);
 router.patch('/admin/keys/:id/revoke', authMiddleware, adminMiddleware, externalApiController.revokeApiKey);

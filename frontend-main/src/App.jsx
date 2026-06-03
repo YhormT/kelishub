@@ -19,14 +19,15 @@ import Profile from './pages/Profile';
 import Shop from './pages/Shop';
 import PublicStorefront from './pages/PublicStorefront';
 import BASE_URL from './endpoints/endpoints';
+import { getStoredAuth, normalizeRole, dashboardPathForRole } from './utils/auth';
 
 const AGENT_INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes for agents
 const ADMIN_INACTIVITY_TIMEOUT = 90 * 60 * 1000; // 1 hour 30 minutes for admin
 const WARNING_BEFORE = 60 * 1000; // 1 minute warning before logout
 
 const PrivateRoute = ({ allowedRoles }) => {
-  const token = localStorage.getItem('token');
-  const userRole = localStorage.getItem('role');
+  const { token, role: userRole } = getStoredAuth();
+  const allowed = allowedRoles.map((r) => normalizeRole(r));
   const navigate = useNavigate();
   const inactivityTimer = useRef(null);
   const warningTimer = useRef(null);
@@ -47,7 +48,7 @@ const PrivateRoute = ({ allowedRoles }) => {
     clearTimeout(inactivityTimer.current);
     clearTimeout(warningTimer.current);
 
-    const role = localStorage.getItem('role');
+    const role = normalizeRole(localStorage.getItem('role'));
     const timeout = role === 'ADMIN' ? ADMIN_INACTIVITY_TIMEOUT : AGENT_INACTIVITY_TIMEOUT;
 
     warningTimer.current = setTimeout(() => {
@@ -101,9 +102,18 @@ const PrivateRoute = ({ allowedRoles }) => {
     return <Navigate to="/login" replace />;
   }
 
-  if (!allowedRoles.includes(userRole)) {
+  if (!userRole) {
+    localStorage.clear();
+    return <Navigate to="/login" replace />;
+  }
+
+  if (!allowed.includes(userRole)) {
+    const fallback = dashboardPathForRole(userRole);
+    if (fallback !== '/login') {
+      return <Navigate to={fallback} replace />;
+    }
     Swal.fire('Access Denied', 'You do not have permission to access this page.', 'error');
-    return <Navigate to="/" replace />;
+    return <Navigate to="/login" replace />;
   }
 
   return <Outlet />;
