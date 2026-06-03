@@ -50,13 +50,7 @@ const buildAlertKey = (orderId, itemId) => `${orderId}-${itemId}`;
 const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
   const [loading, setLoading] = useState(false);
   const [fraudAlerts, setFraudAlerts] = useState([]);
-  const [resolvedIds, setResolvedIds] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("resolvedFraudAlerts") || "[]");
-    } catch {
-      return [];
-    }
-  });
+  const [resolvedIds, setResolvedIds] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const audioRef = useRef(null);
   const prevCountRef = useRef(0);
@@ -69,11 +63,14 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
       });
       if (res.data.success) {
         const alerts = res.data.fraudAlerts || [];
+        const serverResolvedIds = Array.isArray(res.data.resolvedIds)
+          ? res.data.resolvedIds
+          : [];
         setFraudAlerts(alerts);
+        setResolvedIds(serverResolvedIds);
 
-        // Filter out resolved alerts for the count
         const activeAlerts = alerts.filter(
-          (a) => !resolvedIds.includes(`${a.orderId}-${a.itemId}`),
+          (a) => !serverResolvedIds.includes(`${a.orderId}-${a.itemId}`),
         );
 
         if (
@@ -94,7 +91,7 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
     } finally {
       setLoading(false);
     }
-  }, [resolvedIds, soundEnabled, onAlertsUpdate]);
+  }, [soundEnabled, onAlertsUpdate]);
 
   useEffect(() => {
     if (isOpen) {
@@ -122,13 +119,18 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
     };
   }, [isOpen, fetchAlerts]);
 
-  const handleResolve = (orderId, itemId) => {
-    const key = buildAlertKey(orderId, itemId);
-    setResolvedIds((prev) => {
-      const updated = Array.from(new Set([...prev, key]));
-      localStorage.setItem("resolvedFraudAlerts", JSON.stringify(updated));
-      return updated;
-    });
+  const handleResolve = async (orderId, itemId) => {
+    try {
+      await axios.post(
+        `${BASE_URL}/order/admin/resolve-alert`,
+        { orderId, itemId },
+        { headers: getAuthHeaders() },
+      );
+      const key = buildAlertKey(orderId, itemId);
+      setResolvedIds((prev) => Array.from(new Set([...prev, key])));
+    } catch (error) {
+      console.error("Error resolving alert:", error);
+    }
   };
 
   useEffect(() => {
