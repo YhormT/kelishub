@@ -99,6 +99,6 @@ services:
         source: /*
         destination: /index.html
     envVars:
-      # Backend origin at build time (custom domain or https://kellishub-api.onrender.com)
+      # Must match the Node API host (not the static site).
       - key: VITE_API_URL
-        value: https://kellishub.com
+        value: https://api.kellishub.com

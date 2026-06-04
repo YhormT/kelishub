@@ -148,7 +148,19 @@ io.on('connection', (socket) => {
 module.exports = { app, io, userSockets, socketUsers };
 
 app.set('io', io);
-app.use(express.json());
+
+const isPaystackWebhookPath = (url) =>
+  url === '/api/payment/webhook' || url === '/api/topup/webhook';
+
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      if (isPaystackWebhookPath(req.originalUrl?.split('?')[0])) {
+        req.rawBody = buf;
+      }
+    },
+  })
+);
 app.use(cors());
 app.use(helmet());
 

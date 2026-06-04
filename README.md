@@ -1,16 +1,18 @@
 # kellishub — Data Package Fulfillment & Agent Management Platform
 
-A full-stack platform for reselling mobile data bundles and airtime in Ghana. Supports MTN, Telecel (Vodafone), and AirtelTigo networks with a multi-tier agent system, real-time chat, Paystack payments, and SMS-based payment verification.
+A full-stack platform for reselling mobile data bundles and airtime in Ghana. Supports MTN, Telecel (Vodafone), and AirtelTigo with a multi-tier agent system, wallet-based ordering, real-time chat, Paystack payments, SMS verification, and an external partner API.
+
+**Production:** [https://kellishub.com](https://kellishub.com) on [Render](https://render.com) (see `render.yaml`).
 
 ---
 
 ## Architecture
 
 ```
-yhorm_render/              # Repository root
-├── render.yaml            # Render Blueprint (both services)
-├── backend-main/          # Node.js + Express + Prisma (MySQL) → Render Web Service
-└── frontend-main/         # React 18 + Vite + Tailwind + Socket.IO → Render Static Site
+kellishub/                 # Repository root
+├── render.yaml            # Render Blueprint (API + static frontend + MySQL)
+├── backend-main/          # Node.js + Express + Prisma → Web Service
+└── frontend-main/         # React 18 + Vite + Tailwind → Static Site
 ```
 
 ---
@@ -25,17 +27,16 @@ yhorm_render/              # Repository root
 | Database | MySQL via Prisma ORM 6 |
 | Auth | JWT (`jsonwebtoken`), 7-day expiry |
 | Payments | Paystack (Axios) |
+| Supplier API | GMPL (`GMPL_API_URL`, `GMPL_API_KEY`) for file-based data orders |
 | Real-time | Socket.IO 4 (max 500 connections) |
 | Files | Multer + SheetJS (`xlsx`) for Excel orders |
 | Security | Helmet, CORS, rate limiter, AES-256-GCM chat encryption |
-
-**Production hosting:** [Render](https://render.com) — [kellishub.com](https://kellishub.com) (Blueprint: `render.yaml`)
 
 ### Frontend (`frontend-main/`)
 
 | Layer | Technology |
 |-------|------------|
-| Build | **Vite 8** |
+| Build | Vite 8 |
 | UI | React 18, Tailwind CSS 3 |
 | Routing | React Router DOM 7 |
 | HTTP | Axios |
@@ -48,8 +49,9 @@ yhorm_render/              # Repository root
 ### Prerequisites
 
 - Node.js 18+
-- MySQL database (Render MySQL or local)
+- MySQL database
 - Paystack secret key (test or live)
+- GMPL API key (optional — required for external file orders to supplier)
 
 ### Backend
 
@@ -58,28 +60,28 @@ cd backend-main
 npm install
 ```
 
-Create `backend-main/.env` with at least:
+Create `backend-main/.env`:
 
 ```env
-DATABASE_URL="mysql://user:password@localhost:3306/kellishub"
 DATABASE_URL="mysql://user:password@localhost:3306/kellishub"
 JWT_SECRET="your-secret-key"
 CHAT_ENCRYPTION_KEY="your-32-char-key-or-same-as-jwt"
 PAYSTACK_SECRET_KEY="sk_test_..."
 PAYSTACK_CALLBACK_URL="http://localhost:5173/shop"
 FRONTEND_URL="http://localhost:5173"
+GMPL_API_URL="https://api.gmpl.com"
+GMPL_API_KEY="your-gmpl-secret"
 PORT=5000
 NODE_ENV=development
 ```
 
-Then:
-
 ```bash
-npx prisma migrate dev   # applies prisma/migrations (MySQL)
-npm run dev            # nodemon — or: npm start
+npx prisma generate
+npx prisma db push          # or: npx prisma migrate dev
+npm run dev                 # nodemon — or: npm start
 ```
 
-Server listens on **port 5000** by default (`GET /health` for health checks).
+Server listens on **port 5000** (`GET /health` for health checks).
 
 ### Frontend
 
@@ -88,362 +90,210 @@ cd frontend-main
 npm install
 ```
 
-Create `frontend-main/.env.local` (optional for local dev):
+Create `frontend-main/.env.local`:
 
 ```env
 VITE_API_URL=http://localhost:5000
 ```
 
 ```bash
-npm start      # runs: vite
+npm start    # Vite dev server → http://localhost:5173
 ```
 
-Dev server runs at **http://localhost:5173**. API base URL in `src/endpoints/endpoints.js`:
+API base URL (`src/endpoints/endpoints.js`):
 
 ```js
-const BASE_URL = import.meta.env.VITE_API_URL || 'https://kellishub.com';
+const BASE_URL = import.meta.env.VITE_API_URL || 'https://api.kellishub.com';
 ```
-
-For local dev, set `VITE_API_URL=http://localhost:5000` in `frontend-main/.env.local`.
 
 ---
 
 ## Backend Overview
 
-### Architecture pattern
-
-**Routes → Controllers → Services → Prisma → MySQL**
+**Pattern:** Routes → Controllers → Services → Prisma → MySQL
 
 | Path | Role |
 |------|------|
 | `index.js` | Express app, Socket.IO, cron jobs, route mounting |
-| `config/db.js` | Prisma client singleton with connection retry |
 | `middleware/` | JWT auth, admin check, external API keys, rate limit, uploads |
-| `controllers/` | 23 controllers — HTTP request/response |
-| `services/` | 20 services — business logic |
-| `utils/` | Cache, AES encryption, memory monitor, query optimizer |
+| `controllers/` | HTTP handlers |
+| `services/` | Business logic (`externalApiService.js`, `orderService.js`, `gmplService.js`, …) |
+| `prisma/schema.prisma` | Database schema |
 
 ### Wallet balance
 
-Agent spendable balance is stored on `User.loanBalance` (historical field name). Orders debit this field; top-ups and refunds credit it.
+Agent spendable balance is `User.loanBalance`. Cart submit, external API orders, and Excel flows debit this field; top-ups and refunds credit it via `transactionService`.
 
-### Database models (26 Prisma models)
+### External Partner API (`/api/external`)
 
-| Model | Purpose |
-|-------|---------|
-| `User` | Agents & admins — roles, wallet (`loanBalance`), loans, suspension, storefront slug |
-| `Product` | Data/airtime packages — pricing, stock, shop/agent visibility |
-| `Cart` / `CartItem` | Per-user shopping cart |
-| `Order` / `OrderItem` / `OrderBatch` | Orders, line items, bulk Excel export batches |
-| `TopUp` | Wallet top-up records |
-| `Transaction` | Financial ledger (top-ups, orders, loans, refunds) |
-| `PaymentTransaction` | Paystack payment records |
-| `StorefrontProduct` | Agent storefront listings with custom prices |
-| `ReferralOrder` | Storefront orders + commission tracking |
-| `CommissionPayout` | Commission payout batches |
-| `CommissionRequest` | Agent requests for missing commissions |
-| `ChatConversation` / `ChatMessage` | Admin–agent encrypted chat |
-| `ShopChatConversation` / `ShopChatMessage` | Public shop customer–admin chat |
-| `Announcement` / `NotificationRead` | Announcements + read tracking |
-| `Complaint` | Customer complaints |
-| `SmsMessage` | Incoming SMS for payment verification |
-| `Upload` / `Purchase` | Uploaded Excel files and parsed rows |
-| `ExternalApiKey` | Partner API keys |
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `GET /products` | `x-api-key` or `Authorization: Bearer` | List agent products |
+| `POST /orders` | API key | JSON order — **debits linked agent wallet** |
+| `POST /orders/file` | API key | Excel + `network_provider` → wallet check → GMPL |
+| `GET /orders/:orderId` | API key | Order status (own orders only) |
+| `POST /orders/status` | API key | Bulk status (max 50 IDs) |
+| `POST /admin/keys` | Admin JWT | Create key (**requires `agentId`**) |
+| `GET /admin/agents` | Admin JWT | List agents for key assignment |
 
-Schema: `backend-main/prisma/schema.prisma`  
-Migrations: `backend-main/prisma/migrations/` (MySQL; run `npx prisma migrate deploy` on Render)
-### API route groups
+API keys are tied to a specific agent (`ExternalApiKey.agentId`). Orders without sufficient `loanBalance` return HTTP **402**.
+
+### GMPL supplier API (upstream)
+
+Kellishub forwards agent Excel orders to GMPL after wallet debit (`backend-main/services/gmplService.js`).
+
+| GMPL endpoint | `POST https://api.gmpl.com/api/orders/agents/new` |
+| Auth | `Authorization: Bearer <secret>` **or** `x-clerk-api-key: <secret>` (both sent) |
+| Body | `multipart/form-data`: `orderFile` (`.xlsx`), `network_provider` (`mtn`, `telecel`, `airteltigo`, …) |
+
+Direct supplier test (replace secret; do not commit real keys):
+
+```bash
+curl -X POST "https://api.gmpl.com/api/orders/agents/new" \
+  -H "Authorization: Bearer YOUR_GMPL_SECRET" \
+  -F "orderFile=@order.xlsx" \
+  -F "network_provider=mtn"
+```
+
+**Production:** In [Render](https://dashboard.render.com) → `kellishub-api` → **Environment** → set `GMPL_API_KEY` to your GMPL secret → **Save & deploy**. Never put the live key in git or `render.yaml`.
+
+### Other API groups
 
 | Group | Base path | Description |
 |-------|-----------|-------------|
 | Auth | `/api/auth` | Login, register, logout |
-| Users | `/api/users` | CRUD, loans, refunds, suspension, profile |
-| Products | `/products` | Product management, visibility, promos |
-| Cart | `/api/cart` | Add/remove/clear cart |
-| Orders | `/order`, `/api/order` | Submit cart, Excel, paste orders, tracking |
-| Payments | `/api/payment` | Paystack init/verify/webhook, reconciliation |
-| Top-ups | `/api` (topUp routes) | Wallet top-ups (Paystack + SMS) |
-| Transactions | `/api` (transaction routes) | Ledger, balance sheet |
-| Storefront | `/api/storefront` | Agent storefronts, referrals, commissions |
-| External API | `/api/external` | Agent-linked API keys; orders debit wallet; file orders forward to GMPL (`GMPL_API_KEY`) |
-| Chat | `/api/chat` | Admin–agent messaging |
-| Shop chat | `/api/shop-chat` | Shop customer–admin messaging |
-| Announcements | `/api/announcement` | CRUD + audience targeting |
-| Complaints | `/api/complaints` | Complaint management |
-| SMS | `/api/sms` | Incoming SMS webhook |
-| Shop | `/api/shop` | Public shop products & order tracking |
-| Sales, uploads, reset, admin | `/api/sales`, uploads, etc. | Additional admin/ops endpoints |
+| Users | `/api/users` | CRUD, loans, refunds, suspension |
+| Products | `/products` | Catalog, pricing, visibility |
+| Cart | `/api/cart` | Add/remove/clear |
+| Orders | `/order` | Submit cart, Excel upload, tracking |
+| Payments | `/api/payment` | Paystack init/verify |
+| Storefront | `/api/storefront` | Agent storefronts, commissions |
+| Chat / Shop | `/api/chat`, `/api/shop-chat` | Messaging |
+| Shop | `/api/shop` | Public shop (Paystack) |
 
-> Some routes use `/api/...` and others use top-level paths like `/products` and `/order` — match the path the frontend calls for each feature.
+> Some routes use `/api/...` and others top-level paths (`/products`, `/order`) — match what the frontend calls.
 
-### Background jobs (`index.js`)
+### Background jobs
 
-| Job | Interval | What it does |
-|-----|----------|--------------|
-| Orphaned payment reconciliation | 5 min | Creates orders for successful Paystack payments missing an order |
-| Shop order cleanup | 1 hr | Deletes completed public-shop orders older than 72h |
-| Stale referral cleanup | 1 hr | Deletes pending referral orders older than 24h |
-
-### Socket.IO events
-
-- **Registry:** clients emit `register` with `userId` (agents) or `shop-chat:register` with `phone` (shop)
-- **Chat:** `chat:send`, `chat:typing`, `chat:read`, `chat:delete` (+ shop-chat equivalents)
-- **Push:** `new-order`, `balance-updated`, `force-logout`, product/stock updates, suspension
+| Job | Interval | Purpose |
+|-----|----------|---------|
+| Orphaned payment reconciliation | 5 min | Orders for Paystack payments missing an order |
+| Shop order cleanup | 1 hr | Delete old completed shop orders |
+| Stale referral cleanup | 1 hr | Delete stale pending referrals |
 
 ---
 
 ## Frontend Overview
 
-### Roles & dashboards
+### Roles and routes
 
-| Role | `User.role` | Route | Notes |
-|------|-------------|-------|-------|
-| Admin | `ADMIN` | `/admin` | Full admin panel |
-| User | `USER` | `/user` | Standard agent dashboard |
-| Premium | `PREMIUM` | `/premium` | Amber/gold theme |
-| Super Agent | `SUPER` | `/superagent` | Emerald theme |
-| Normal Agent | `NORMAL` | `/normalagent` | Blue/indigo theme |
-| Other | `OTHER` | `/otherdashboard` | Purple/pink theme |
-| Profile | all roles above | `/profile` | Shared profile page |
+| Role | `User.role` | Dashboard route |
+|------|-------------|-----------------|
+| Admin | `ADMIN` | `/admin` |
+| User | `USER` | `/user` |
+| Premium | `PREMIUM` | `/premium` |
+| Super Agent | `SUPER` | `/superagent` |
+| Normal Agent | `NORMAL` | `/normalagent` |
+| Other | `OTHER` | `/otherdashboard` |
+| Profile | all above | `/profile` |
 
-### Public pages
+Public: `/` (landing), `/login`, `/shop`, `/store/:slug`.
 
-| Route | Page |
-|-------|------|
-| `/` | Marketing landing |
-| `/login`, `/register` | Authentication |
-| `/shop` | Public data shop (Paystack checkout) |
-| `/store/:slug` | Per-agent public storefront |
+### Auth and routing
 
-### Key directories
+- JWT + role in `localStorage`; `Authorization: Bearer <token>` on API calls
+- `src/utils/auth.js` — normalized role checks and dashboard redirects
+- Protected routes in `App.jsx` (`PrivateRoute`)
+- Inactivity logout: **30 min** (agents), **90 min** (admin)
+- **SPA rewrites** in `render.yaml` for `/admin`, `/user`, etc. so refresh keeps you on the dashboard
 
-- `src/pages/` — 12 route-level screens
-- `src/components/` — 32 reusable UI modules
-- `src/utils/socket.js` — shared Socket.IO singleton
+### Key paths
+
+- `src/pages/` — route screens (e.g. `AdminDashboard.jsx`)
+- `src/components/` — UI modules (e.g. `ExternalApiKeys.jsx`)
 - `src/endpoints/endpoints.js` — API base URL
-
-### Security (client)
-
-- JWT + role stored in `localStorage`; sent as `Authorization: Bearer <token>`
-- Inactivity logout: **30 min** (agents), **90 min** (admin), with 1-minute warning
-- Admin **force-logout** via Socket.IO
+- `public/_redirects` — SPA fallback for hosts that read it
 
 ---
 
 ## Environment Variables
 
-### Backend (`backend-main/.env`)
+### Backend (`kellishub-api`)
 
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | MySQL connection string (`mysql://`) |
-| `JWT_SECRET` | JWT signing key |
-| `CHAT_ENCRYPTION_KEY` | AES-256 key for chat (falls back to `JWT_SECRET`) |
-| `PAYSTACK_SECRET_KEY` | Paystack API secret |
-| `PAYSTACK_CALLBACK_URL` | Post-payment redirect (e.g. `https://your-app.com/shop`) |
-| `FRONTEND_URL` | Frontend origin for top-up callbacks |
-| `PORT` | Server port (default `5000`; Render sets this automatically) |
-| `NODE_ENV` | `development` or `production` |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | Yes | MySQL connection string |
+| `JWT_SECRET` | Yes | JWT signing |
+| `CHAT_ENCRYPTION_KEY` | Yes | Chat encryption (or same as `JWT_SECRET`) |
+| `PAYSTACK_SECRET_KEY` | Yes | Paystack secret |
+| `PAYSTACK_CALLBACK_URL` | Yes | e.g. `https://kellishub.com/shop` |
+| `FRONTEND_URL` | Yes | e.g. `https://kellishub.com` |
+| `GMPL_API_URL` | Yes for file API | Default `https://api.gmpl.com` |
+| `GMPL_API_KEY` | Yes for file API | Supplier API secret (`sync: false` in Blueprint) |
+| `NODE_ENV` | Yes | `production` on Render |
+| `PORT` | Auto on Render | Default `5000` locally |
 
-### Frontend (`frontend-main/.env.local` or host env)
+### Frontend (`kellishub-web`, build time)
 
-| Variable | Description |
-|----------|-------------|
-| `VITE_API_URL` | Backend origin — **required on Render** at frontend build time (e.g. `https://your-api.onrender.com`) |
-
-If unset locally, `endpoints.js` defaults to `https://kellishub.com`. Use `.env.local` with `VITE_API_URL=http://localhost:5000` for development.
-
----
-
-## Running Tests
-
-No automated tests are implemented yet.
-
-- **Backend:** `npm test` — placeholder script
-- **Frontend:** no `test` script in `package.json`
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `VITE_API_URL` | Yes | Node API host (`https://api.kellishub.com`) — **not** the static site URL |
 
 ---
 
 ## Deployment on Render
 
-Deploy **two services** plus a **Render MySQL** database from the root **`render.yaml`** Blueprint, or create them manually in the dashboard with the same settings.
+Deploy from root **`render.yaml`** (Blueprint) or mirror settings manually.
 
-> **Note:** The database provider is MySQL. Existing PostgreSQL data does not transfer automatically — use a fresh database on Render or migrate data with an ETL tool if moving from PostgreSQL.
+| Service | Name | Type |
+|---------|------|------|
+| API | `kellishub-api` | Web Service (Node) |
+| UI | `kellishub-web` | Static Site (Vite → `dist`) |
+| DB | `kellishub-db` | Render MySQL |
 
-| Service | Blueprint name | Type | Default URL |
-|---------|----------------|------|-------------|
-| API | `kellishub-api` | Web Service (Node) | `https://kellishub-api.onrender.com` |
-| UI | `kellishub-web` | Static Site (Vite) | `https://kellishub-web.onrender.com` |
+### Blueprint steps
 
-Custom domains (e.g. `kellishub.com`) are set in the Render Dashboard per service. Update `VITE_API_URL`, `FRONTEND_URL`, and `PAYSTACK_CALLBACK_URL` when those URLs change.
+1. Push repo to GitHub/GitLab.
+2. Render Dashboard → **New** → **Blueprint** → connect repo.
+3. Set dashboard secrets: `PAYSTACK_SECRET_KEY`, `GMPL_API_KEY`.
+4. Attach custom domain **`kellishub.com`** to the **frontend** static site.
+5. Set **`VITE_API_URL`** on `kellishub-web` to `https://api.kellishub.com` (if not using Blueprint default), then redeploy the frontend.
+6. In Paystack Dashboard → Webhooks: `https://api.kellishub.com/api/payment/webhook` and `https://api.kellishub.com/api/topup/webhook`.
 
----
+`JWT_SECRET` and `CHAT_ENCRYPTION_KEY` can be auto-generated. Production URLs in Blueprint:
 
-### Option A: Blueprint (recommended)
-
-1. Push this repo to GitHub/GitLab.
-2. [Render Dashboard](https://dashboard.render.com) → **New** → **Blueprint**.
-3. Connect the repo — Render reads **`render.yaml`** at the repo root.
-4. When prompted, set secrets marked `sync: false`:
-   - `DATABASE_URL` — auto-linked from Render MySQL (`kellishub-db`) when using the Blueprint
-   - `PAYSTACK_SECRET_KEY` — from [Paystack](https://dashboard.paystack.com)
-5. Wait for both services to build and deploy.
-
-`JWT_SECRET` and `CHAT_ENCRYPTION_KEY` are auto-generated on first sync. `VITE_API_URL` and frontend callback URLs are wired to the default service names above.
-
----
-
-### Option B: Manual dashboard setup
-
-Create each service separately with the same settings as the Blueprint.
-
-#### 1. MySQL database
-
-Use **Render MySQL** (recommended — defined in `render.yaml` as `kellishub-db`) or any MySQL host. The Blueprint wires `DATABASE_URL` via `fromDatabase.connectionString`.
-
-For manual setup, create a MySQL instance and set `DATABASE_URL` on the API service (e.g. `mysql://user:pass@host:3306/kellishub`).
-
-#### 2. Backend — Web Service (`kellishub-api`)
-
-**New** → **Web Service** → connect repo.
-
-| Setting | Value |
-|---------|--------|
-| **Root Directory** | `backend-main` |
-| **Build Command** | `npm install && npx prisma generate` |
-| **Start Command** | `node index.js` |
-
-| Variable | Required | Notes |
-|----------|----------|-------|
-| `DATABASE_URL` | Yes | `mysql://user:pass@host:3306/dbname` (or Render internal URL) |
-| `JWT_SECRET` | Yes | Random secret; Blueprint can `generateValue: true` |
-| `CHAT_ENCRYPTION_KEY` | Yes | 32-char key or same as `JWT_SECRET` |
-| `PAYSTACK_SECRET_KEY` | Yes | Paystack secret key |
-| `PAYSTACK_CALLBACK_URL` | Yes | `https://<frontend-host>/shop` |
-| `FRONTEND_URL` | Yes | `https://<frontend-host>` |
-| `NODE_ENV` | Yes | `production` |
-
-### Frontend (Render static site or other host)
-
-| Variable | Required | Notes |
-|----------|----------|-------|
-| `VITE_API_URL` | Yes | `https://<api-host>` — no trailing slash |
-
-**SPA routing:** Add a rewrite so React Router works on refresh:
-
-| Type | Source | Destination |
-|------|--------|-------------|
-| Rewrite | `/*` | `/index.html` |
-
-(In the Blueprint this is already under `kellishub-web` → `routes`.)
-
----
-
-### `render.yaml` reference
-
-Full Blueprint at the repo root:
-
-```yaml
-databases:
-  - name: kellishub-db
-    plan: free
-    databaseName: kellishub
-    user: kellishub
-
-services:
-  - type: web
-    name: kellishub-api
-    runtime: node
-    rootDir: backend-main
-    plan: starter
-    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy
-    startCommand: node index.js
-    healthCheckPath: /health
-    buildFilter:
-      paths:
-        - backend-main/**
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: DATABASE_URL
-        fromDatabase:
-          name: kellishub-db
-          property: connectionString
-      - key: JWT_SECRET
-        generateValue: true
-      - key: CHAT_ENCRYPTION_KEY
-        generateValue: true
-      - key: PAYSTACK_SECRET_KEY
-        sync: false
-      - key: PAYSTACK_CALLBACK_URL
-        value: https://kellishub-web.onrender.com/shop
-      - key: FRONTEND_URL
-        value: https://kellishub-web.onrender.com
-
-  - type: web
-    name: kellishub-web
-    runtime: static
-    rootDir: frontend-main
-    buildCommand: npm install && npm run build
-    staticPublishPath: ./dist
-    buildFilter:
-      paths:
-        - frontend-main/**
-    routes:
-      - type: rewrite
-        source: /*
-        destination: /index.html
-    envVars:
-      - key: VITE_API_URL
-        value: https://kellishub-api.onrender.com
-```
-
-| Blueprint field | Purpose |
-|-----------------|--------|
-| `rootDir` | Monorepo subfolder; build/start paths are relative to it |
-| `buildFilter` | Only redeploy when files under that folder change |
-| `healthCheckPath` | Zero-downtime deploys for the API |
-| `databases` | Render MySQL; `DATABASE_URL` linked to the API automatically |
-| `sync: false` | Prompt for secrets in the dashboard (not stored in Git) |
-| `generateValue: true` | Auto-generate `JWT_SECRET` / `CHAT_ENCRYPTION_KEY` |
-| `routes` (static) | SPA fallback for `/admin`, `/shop`, `/store/:slug`, etc. |
-
----
+- `FRONTEND_URL` / `PAYSTACK_CALLBACK_URL` → `https://kellishub.com`
+- `VITE_API_URL` (frontend build) → `https://api.kellishub.com`
 
 ### Post-deploy checklist
 
-1. `GET https://kellishub.com/health` or `GET https://kellishub-api.onrender.com/health` → `{ "status": "ok", ... }`
-2. Frontend login and API calls reach the same origin as `VITE_API_URL`
-3. Paystack `PAYSTACK_CALLBACK_URL` and `FRONTEND_URL` match your live frontend host
-4. Socket.IO connects to the same host as `VITE_API_URL`
+- [ ] `GET /health` returns `{ "status": "ok", ... }`
+- [ ] Login as admin → `/admin` → **refresh** stays on admin (not landing page)
+- [ ] Agent cart submit debits wallet; external API returns 402 when balance is low
+- [ ] `GMPL_API_KEY` set on API service if using file orders
+- [ ] Paystack callbacks use live frontend URL; webhooks point at API host (`/api/payment/webhook`, `/api/topup/webhook`)
+- [ ] `VITE_API_URL` on frontend points at API host (not `kellishub.com` unless API is proxied there)
+- [ ] Revoke old external API keys without `agentId`; create new per-agent keys in admin UI
 
-1. **Render Dashboard** → static site `kellishub-web` → **Redirects/Rewrites** → add:
-   - Source: `/*` → Destination: `/index.html` → Action: **Rewrite**
-2. Or **sync the Blueprint** so `render.yaml` routes apply, then redeploy the frontend.
-3. The build includes `frontend-main/public/_redirects` as a fallback.
+### SPA routing on Render
 
-After changing rewrite rules, trigger a **manual deploy** of the static site.
+`render.yaml` includes rewrites for `/login`, `/admin`, `/user`, `/shop`, `/store/*`, and `/*` → `/index.html`. Sync the Blueprint or copy routes in the static site dashboard, then redeploy.
 
-## Environment Variables
+---
 
-### Backend (`backend-main/.env`)
+## Running Tests
 
-| Variable | Description |
-|----------|-------------|
-| `DATABASE_URL` | MySQL connection string (`mysql://...`) |
-| `JWT_SECRET` | JWT signing key |
-| `CHAT_ENCRYPTION_KEY` | AES-256 key for chat |
-| `PAYSTACK_SECRET_KEY` | Paystack API secret |
-| `PAYSTACK_CALLBACK_URL` | Post-payment redirect |
-| `FRONTEND_URL` | Frontend origin for callbacks |
-| `PORT` | Server port (Render sets automatically) |
-| `NODE_ENV` | `development` or `production` |
+No automated test suite yet. Backend `npm test` is a placeholder.
 
-### Frontend
+---
 
-| Variable | Description |
-|----------|-------------|
-| `VITE_API_URL` | Backend origin at build time; defaults to `https://kellishub.com` |
+## Internal documentation
+
+A technical investigation of the original codebase (wallet/API issues and remediation) may be kept locally as `INVESTIGATION.md` (gitignored) with PDF export via:
+
+```bash
+node scripts/generate-investigation-pdf.js
+```
 
 ---
 

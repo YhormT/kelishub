@@ -329,22 +329,31 @@ const linkTransactionToOrder = async (externalRef, orderId) => {
   });
 };
 
-// Get all successful payments that don't have orders (for reconciliation)
-// Excludes payments that already failed order creation (permanent failures like product unavailable)
+// Payments that succeeded (or likely succeeded) on Paystack but have no linked order yet
 const getOrphanedSuccessfulPayments = async () => {
+  const staleCutoff = new Date(Date.now() - 90 * 1000);
+
   return await prisma.paymentTransaction.findMany({
     where: {
-      status: 'SUCCESS',
       orderId: null,
       productId: { not: null },
       OR: [
-        { moolreMessage: null },
-        { moolreMessage: { equals: '' } },
-        { moolreMessage: { not: { startsWith: 'Order creation failed' } } }
-      ]
+        {
+          status: 'SUCCESS',
+          OR: [
+            { moolreMessage: null },
+            { moolreMessage: { equals: '' } },
+            { moolreMessage: { not: { startsWith: 'Order creation failed' } } },
+          ],
+        },
+        {
+          status: { in: ['INITIALIZED', 'PENDING'] },
+          createdAt: { lte: staleCutoff },
+        },
+      ],
     },
     orderBy: { createdAt: 'desc' },
-    take: 50
+    take: 50,
   });
 };
 

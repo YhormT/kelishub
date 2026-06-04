@@ -1,7 +1,7 @@
 const paymentService = require("../services/paymentService");
 const shopService = require("../services/shopService");
-const crypto = require("crypto");
 const prisma = require("../config/db");
+const { verifyPaystackSignature } = require("../utils/paystackWebhook");
 
 // Atomic order creation - prevents duplicate orders from webhook + verify race condition
 const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
@@ -177,13 +177,8 @@ const initializePayment = async (req, res) => {
 // Handle Paystack webhook callback
 const handleWebhook = async (req, res) => {
   try {
-    // Verify webhook signature
-    const hash = crypto
-      .createHmac("sha512", process.env.PAYSTACK_SECRET_KEY)
-      .update(JSON.stringify(req.body))
-      .digest("hex");
-
-    if (hash !== req.headers["x-paystack-signature"]) {
+    const signature = req.headers["x-paystack-signature"];
+    if (!verifyPaystackSignature(req.rawBody, signature)) {
       console.error("Invalid Paystack webhook signature");
       return res.status(400).json({ error: "Invalid signature" });
     }

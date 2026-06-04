@@ -1,5 +1,6 @@
 const topupPaymentService = require("../services/topupPaymentService");
 const prisma = require("../config/db");
+const { verifyPaystackSignature } = require("../utils/paystackWebhook");
 
 // Helper: emit 'balance-updated' WebSocket event to a specific user after a top-up
 // so the frontend wallet refreshes in real-time without requiring logout/login.
@@ -28,12 +29,20 @@ const emitTopupBalanceUpdate = async (userId, type = 'TOPUP', amount = 0) => {
 // Initialize Paystack payment for wallet top-up
 const initializeTopup = async (req, res) => {
   try {
-    const { userId, amount } = req.body;
+    const amount = req.body.amount;
+    const userId = req.user?.id ?? req.body.userId;
 
     if (!userId || !amount) {
       return res.status(400).json({
         success: false,
         message: "User ID and amount are required",
+      });
+    }
+
+    if (parseInt(userId, 10) !== parseInt(req.user.id, 10)) {
+      return res.status(403).json({
+        success: false,
+        message: "Cannot initialize top-up for another user",
       });
     }
 
@@ -102,6 +111,12 @@ const verifyTopup = async (req, res) => {
 // Handle Paystack webhook for top-ups
 const handleWebhook = async (req, res) => {
   try {
+    const signature = req.headers["x-paystack-signature"];
+    if (!verifyPaystackSignature(req.rawBody, signature)) {
+      console.error("Invalid Paystack top-up webhook signature");
+      return res.status(400).json({ success: false, error: "Invalid signature" });
+    }
+
     const result = await topupPaymentService.handleTopupWebhook(req.body);
     res.status(200).json(result);
   } catch (error) {
