@@ -103,7 +103,7 @@ npm start    # Vite dev server → http://localhost:5173
 API base URL (`src/endpoints/endpoints.js`):
 
 ```js
-const BASE_URL = import.meta.env.VITE_API_URL || 'https://kellishub.com';
+const BASE_URL = import.meta.env.VITE_API_URL || 'https://api.kellishub.com';
 ```
 
 ---
@@ -237,7 +237,7 @@ Public: `/` (landing), `/login`, `/shop`, `/store/:slug`.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VITE_API_URL` | Yes | API origin, e.g. `https://kellishub.com` — **no trailing slash** |
+| `VITE_API_URL` | Yes | Node API host (`https://api.kellishub.com`) — **not** the static site URL |
 
 ---
 
@@ -256,13 +256,14 @@ Deploy from root **`render.yaml`** (Blueprint) or mirror settings manually.
 1. Push repo to GitHub/GitLab.
 2. Render Dashboard → **New** → **Blueprint** → connect repo.
 3. Set dashboard secrets: `PAYSTACK_SECRET_KEY`, `GMPL_API_KEY`.
-4. Attach custom domain **`kellishub.com`** to frontend (and API if same-origin).
-5. Redeploy frontend after changing `VITE_API_URL`.
+4. Attach custom domain **`kellishub.com`** to the **frontend** static site.
+5. Set **`VITE_API_URL`** on `kellishub-web` to `https://api.kellishub.com` (if not using Blueprint default), then redeploy the frontend.
+6. In Paystack Dashboard → Webhooks: `https://api.kellishub.com/api/payment/webhook` and `https://api.kellishub.com/api/topup/webhook`.
 
 `JWT_SECRET` and `CHAT_ENCRYPTION_KEY` can be auto-generated. Production URLs in Blueprint:
 
 - `FRONTEND_URL` / `PAYSTACK_CALLBACK_URL` → `https://kellishub.com`
-- `VITE_API_URL` → `https://kellishub.com`
+- `VITE_API_URL` (frontend build) → `https://api.kellishub.com`
 
 ### Post-deploy checklist
 
@@ -270,7 +271,8 @@ Deploy from root **`render.yaml`** (Blueprint) or mirror settings manually.
 - [ ] Login as admin → `/admin` → **refresh** stays on admin (not landing page)
 - [ ] Agent cart submit debits wallet; external API returns 402 when balance is low
 - [ ] `GMPL_API_KEY` set on API service if using file orders
-- [ ] Paystack callbacks use live frontend URL
+- [ ] Paystack callbacks use live frontend URL; webhooks point at API host (`/api/payment/webhook`, `/api/topup/webhook`)
+- [ ] `VITE_API_URL` on frontend points at API host (not `kellishub.com` unless API is proxied there)
 - [ ] Revoke old external API keys without `agentId`; create new per-agent keys in admin UI
 
 ### SPA routing on Render
