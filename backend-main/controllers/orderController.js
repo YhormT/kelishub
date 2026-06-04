@@ -969,6 +969,10 @@ exports.cancelOrderItem = async (req, res) => {
 // ==================== ORDER BATCH (ORDER FILES) CONTROLLERS ====================
 
 const orderBatchService = require("../services/orderBatchService");
+const {
+  buildSupplierExcelBuffer,
+  submitRowsToGmpl,
+} = require("../utils/gmplOrderExport");
 
 exports.getPendingCounts = async (req, res) => {
   try {
@@ -981,7 +985,7 @@ exports.getPendingCounts = async (req, res) => {
 
 exports.exportPendingOrders = async (req, res) => {
   try {
-    const { network } = req.body;
+    const { network, submitToGmpl } = req.body;
     if (!network)
       return res
         .status(400)
@@ -993,19 +997,33 @@ exports.exportPendingOrders = async (req, res) => {
       network,
     );
 
-    const XLSX = require("xlsx");
-    const wsData = [["Phone Number", "Data Size"]];
-    for (const row of rows) {
-      let phone = row.phone || "";
-      if (phone.startsWith("233")) phone = "0" + phone.substring(3);
-      const dataSize = (row.bundle || "").replace(/[^0-9.]/g, "");
-      wsData.push([phone, dataSize]);
-    }
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    XLSX.utils.book_append_sheet(wb, ws, "Orders");
-    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    const buffer = buildSupplierExcelBuffer(rows);
+    const shouldSubmitGmpl =
+      submitToGmpl !== false && Boolean(process.env.GMPL_API_KEY);
 
+    if (shouldSubmitGmpl) {
+      try {
+        const gmplResult = await submitRowsToGmpl(rows, network);
+        res.setHeader("X-GMPL-Submitted", "true");
+        if (gmplResult && typeof gmplResult === "object") {
+          res.setHeader(
+            "X-GMPL-Batch-Id",
+            String(gmplResult.id || gmplResult.orderId || batch.id),
+          );
+        }
+      } catch (gmplErr) {
+        console.error("[exportPendingOrders] GMPL submit failed:", gmplErr.message);
+        res.setHeader("X-GMPL-Submitted", "false");
+        res.setHeader(
+          "X-GMPL-Error",
+          encodeURIComponent(gmplErr.message || "GMPL submit failed"),
+        );
+      }
+    } else if (!process.env.GMPL_API_KEY) {
+      res.setHeader("X-GMPL-Submitted", "skipped");
+    }
+
+    res.setHeader("X-Batch-Id", String(batch.id));
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1018,6 +1036,80 @@ exports.exportPendingOrders = async (req, res) => {
   } catch (error) {
     const status = error.message.includes("No pending") ? 404 : 500;
     res.status(status).json({ success: false, message: error.message });
+  }
+};
+
+exports.submitBatchToGmpl = async (req, res) => {
+  try {
+    const { batch, rows } = await orderBatchService.getBatchForDownload(
+      req.params.batchId,
+    );
+    const network = batch.network;
+    if (!network) {
+      return res.status(400).json({
+        success: false,
+        message: "Batch has no network label; cannot submit to GMPL.",
+      });
+    }
+
+    const gmplResult = await submitRowsToGmpl(rows, network);
+    res.json({
+      success: true,
+      message: `Batch #${batch.id} submitted to GMPL (${network}).`,
+      batchId: batch.id,
+      gmpl: gmplResult,
+    });
+  } catch (error) {
+    console.error("[submitBatchToGmpl]", error.message);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.submitAdminGmplFile = async (req, res) => {
+  const filePath = req.file?.path;
+  try {
+    if (!filePath) {
+      return res.status(400).json({
+        success: false,
+        message: "orderFile is required (Excel .xlsx).",
+      });
+    }
+
+    const network =
+      req.body.network_provider ||
+      req.body.networkProvider ||
+      req.body.network;
+    if (!network) {
+      return res.status(400).json({
+        success: false,
+        message: "network is required (e.g. MTN, TELECEL, AIRTEL TIGO).",
+      });
+    }
+
+    const gmplService = require("../services/gmplService");
+    const { networkToGmplProvider } = require("../utils/gmplOrderExport");
+    const gmplResult = await gmplService.submitAgentOrderFile(
+      filePath,
+      networkToGmplProvider(network),
+    );
+
+    res.json({
+      success: true,
+      message: "File submitted to GMPL successfully.",
+      gmpl: gmplResult,
+    });
+  } catch (error) {
+    console.error("[submitAdminGmplFile]", error.message);
+    res.status(400).json({ success: false, message: error.message });
+  } finally {
+    if (filePath) {
+      try {
+        const fs = require("fs");
+        fs.unlinkSync(filePath);
+      } catch (_) {
+        /* ignore */
+      }
+    }
   }
 };
 
@@ -1105,18 +1197,7 @@ exports.downloadBatch = async (req, res) => {
       req.params.batchId,
     );
 
-    const XLSX = require("xlsx");
-    const wsData = [["Phone Number", "Data Size"]];
-    for (const row of rows) {
-      let phone = row.phone || "";
-      if (phone.startsWith("233")) phone = "0" + phone.substring(3);
-      const dataSize = (row.bundle || "").replace(/[^0-9.]/g, "");
-      wsData.push([phone, dataSize]);
-    }
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-    XLSX.utils.book_append_sheet(wb, ws, "Orders");
-    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    const buffer = buildSupplierExcelBuffer(rows);
 
     res.setHeader(
       "Content-Type",

@@ -140,7 +140,10 @@ API keys are tied to a specific agent (`ExternalApiKey.agentId`). Orders without
 
 ### GMPL supplier API (upstream)
 
-Kellishub forwards agent Excel orders to GMPL after wallet debit (`backend-main/services/gmplService.js`).
+Kellishub forwards Excel orders to GMPL via `gmplService.js`:
+
+- **External API:** `POST /api/external/orders/file` (agent API key + wallet debit)
+- **Admin → Order Files:** export pending by network (auto-submit), **Send to GMPL** on a batch, or direct **Submit Excel to GMPL**
 
 | GMPL endpoint | `POST https://api.gmpl.com/api/orders/agents/new` |
 | Auth | `Authorization: Bearer <secret>` **or** `x-clerk-api-key: <secret>` (both sent) |

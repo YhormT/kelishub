@@ -98,6 +98,19 @@ router.post(
   adminMiddleware,
   orderController.exportPendingOrders,
 );
+router.post(
+  "/admin/batches/:batchId/submit-gmpl",
+  authMiddleware,
+  adminMiddleware,
+  orderController.submitBatchToGmpl,
+);
+router.post(
+  "/admin/gmpl/submit",
+  authMiddleware,
+  adminMiddleware,
+  upload.single("orderFile"),
+  orderController.submitAdminGmplFile,
+);
 router.get(
   "/admin/batches",
   authMiddleware,
