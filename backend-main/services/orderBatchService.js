@@ -1,88 +1,6 @@
 const prisma = require("../config/db");
 const { createTransaction } = require("./transactionService");
 
-const normalizeItemStatus = (status) =>
-  status === "Canceled" ? "Cancelled" : status;
-
-const computeOverallBatchStatus = (batch, items) => {
-  const totalItems = batch.totalItems || items.length;
-  const statusCounts = { Pending: 0, Processing: 0, Completed: 0, Cancelled: 0 };
-
-  for (const item of items) {
-    const s = normalizeItemStatus(item.status);
-    if (statusCounts[s] !== undefined) statusCounts[s]++;
-  }
-
-  let overallStatus = batch.status;
-  if (totalItems > 0) {
-    if (statusCounts.Completed === totalItems) overallStatus = "Completed";
-    else if (statusCounts.Cancelled === totalItems) overallStatus = "Cancelled";
-    else if (statusCounts.Processing > 0) overallStatus = "Processing";
-    else overallStatus = "Pending";
-  }
-
-  return { overallStatus, statusCounts, totalItems };
-};
-
-const deriveEffectiveGmplStatus = (overallStatus, gmplStatus) => {
-  if (gmplStatus === "submitted") return "submitted";
-  if (overallStatus === "Completed" || overallStatus === "Cancelled") {
-    if (gmplStatus === "pending" || gmplStatus === "failed") {
-      return "not_applicable";
-    }
-  }
-  return gmplStatus;
-};
-
-const batchHasActiveItems = (items) =>
-  items.some((item) =>
-    ["Pending", "Processing"].includes(normalizeItemStatus(item.status)),
-  );
-
-const gmplStatusForTerminalBatch = (newStatus, currentGmplStatus) => {
-  if (
-    ["Completed", "Cancelled"].includes(newStatus) &&
-    ["pending", "failed"].includes(currentGmplStatus)
-  ) {
-    return "skipped";
-  }
-  return null;
-};
-
-/**
- * One-time cleanup: batches already fulfilled should not stay GMPL pending/failed.
- */
-const backfillStaleGmplStatuses = async () => {
-  const batches = await prisma.orderBatch.findMany({
-    where: { gmplStatus: { in: ["pending", "failed"] } },
-    select: {
-      id: true,
-      status: true,
-      totalItems: true,
-      gmplStatus: true,
-      items: { select: { status: true } },
-    },
-  });
-
-  let updated = 0;
-  for (const batch of batches) {
-    const { overallStatus } = computeOverallBatchStatus(batch, batch.items);
-    if (overallStatus !== "Completed" && overallStatus !== "Cancelled") continue;
-
-    await prisma.orderBatch.update({
-      where: { id: batch.id },
-      data: { gmplStatus: "skipped", gmplError: null },
-    });
-    updated++;
-  }
-
-  if (updated > 0) {
-    console.log(`[GMPL] Backfilled ${updated} completed/cancelled batch(es) to GMPL skipped`);
-  }
-
-  return updated;
-};
-
 /**
  * Get counts of pending order items grouped by network (for export UI)
  */
@@ -232,10 +150,21 @@ const getAllBatches = async (page = 1, limit = 20) => {
   ]);
 
   const result = batches.map(batch => {
-    const { overallStatus, statusCounts, totalItems } = computeOverallBatchStatus(
-      batch,
-      batch.items,
-    );
+    const totalItems = batch.totalItems || batch._count.items;
+    let statusCounts = { Pending: 0, Processing: 0, Completed: 0, Cancelled: 0 };
+
+    for (const item of batch.items) {
+      const s = item.status === "Canceled" ? "Cancelled" : item.status;
+      if (statusCounts[s] !== undefined) statusCounts[s]++;
+    }
+
+    let overallStatus = batch.status;
+    if (totalItems > 0) {
+      if (statusCounts.Completed === totalItems) overallStatus = "Completed";
+      else if (statusCounts.Cancelled === totalItems) overallStatus = "Cancelled";
+      else if (statusCounts.Processing > 0) overallStatus = "Processing";
+      else overallStatus = "Pending";
+    }
 
     const agents = [];
     const seenAgents = new Set();
@@ -255,8 +184,7 @@ const getAllBatches = async (page = 1, limit = 20) => {
       totalPrice: batch.totalPrice,
       status: overallStatus,
       statusCounts,
-      gmplStatus: deriveEffectiveGmplStatus(overallStatus, batch.gmplStatus),
-      gmplStatusRaw: batch.gmplStatus,
+      gmplStatus: batch.gmplStatus,
       gmplSubmittedAt: batch.gmplSubmittedAt,
       gmplError: batch.gmplError,
       gmplResponseId: batch.gmplResponseId,
@@ -311,11 +239,6 @@ const getBatchById = async (batchId) => {
     orderMap.get(orderId).items.push(item);
   }
   batch.orders = [...orderMap.values()];
-
-  const { overallStatus } = computeOverallBatchStatus(batch, batch.items);
-  batch.status = overallStatus;
-  batch.gmplStatusRaw = batch.gmplStatus;
-  batch.gmplStatus = deriveEffectiveGmplStatus(overallStatus, batch.gmplStatus);
 
   return batch;
 };
@@ -384,16 +307,9 @@ const updateBatchStatus = async (batchId, newStatus) => {
     });
     updatedCount = result.count;
 
-    const batchUpdate = { status: newStatus };
-    const nextGmplStatus = gmplStatusForTerminalBatch(newStatus, batch.gmplStatus);
-    if (nextGmplStatus) {
-      batchUpdate.gmplStatus = nextGmplStatus;
-      batchUpdate.gmplError = null;
-    }
-
     await tx.orderBatch.update({
       where: { id: parseInt(batchId) },
-      data: batchUpdate,
+      data: { status: newStatus }
     });
 
     return {
@@ -484,9 +400,5 @@ module.exports = {
   getBatchById,
   updateBatchStatus,
   updateBatchOrderItemStatus,
-  getBatchForDownload,
-  computeOverallBatchStatus,
-  deriveEffectiveGmplStatus,
-  batchHasActiveItems,
-  backfillStaleGmplStatuses,
+  getBatchForDownload
 };

@@ -1,11 +1,6 @@
 const prisma = require('../config/db');
 const orderBatchService = require('./orderBatchService');
 const {
-  computeOverallBatchStatus,
-  batchHasActiveItems,
-  backfillStaleGmplStatuses,
-} = orderBatchService;
-const {
   buildSupplierExcelBuffer,
   submitRowsToGmpl,
 } = require('../utils/gmplOrderExport');
@@ -90,14 +85,7 @@ const getSystemAdminUserId = async () => {
 const submitExistingBatchToGmpl = async (batchId, { incrementRetry = false } = {}) => {
   const existing = await prisma.orderBatch.findUnique({
     where: { id: parseInt(batchId, 10) },
-    select: {
-      id: true,
-      network: true,
-      gmplStatus: true,
-      status: true,
-      totalItems: true,
-      items: { select: { status: true } },
-    },
+    select: { id: true, network: true, gmplStatus: true },
   });
 
   if (!existing) {
@@ -106,15 +94,6 @@ const submitExistingBatchToGmpl = async (batchId, { incrementRetry = false } = {
 
   if (existing.gmplStatus === 'submitted') {
     throw new Error('Batch already submitted to GMPL.');
-  }
-
-  const { overallStatus } = computeOverallBatchStatus(existing, existing.items);
-  if (overallStatus === 'Completed' || overallStatus === 'Cancelled') {
-    throw new Error('Batch is already completed or cancelled — GMPL submit not applicable.');
-  }
-
-  if (!batchHasActiveItems(existing.items)) {
-    throw new Error('Batch has no pending or processing orders to send to GMPL.');
   }
 
   if (!existing.network) {
@@ -230,32 +209,15 @@ const retryFailedBatches = async () => {
     where: {
       gmplStatus: 'failed',
       gmplRetryCount: { lt: maxRetries },
-      items: {
-        some: {
-          status: { in: ['Pending', 'Processing'] },
-        },
-      },
     },
     orderBy: { createdAt: 'asc' },
     take: 5,
-    select: {
-      id: true,
-      network: true,
-      status: true,
-      totalItems: true,
-      items: { select: { status: true } },
-    },
+    select: { id: true, network: true },
   });
 
   const results = [];
 
   for (const batch of failedBatches) {
-    const { overallStatus } = computeOverallBatchStatus(batch, batch.items);
-    if (overallStatus === 'Completed' || overallStatus === 'Cancelled') {
-      await recordGmplSubmission(batch.id, { status: 'skipped', error: null });
-      continue;
-    }
-
     try {
       const result = await submitExistingBatchToGmpl(batch.id, { incrementRetry: true });
       results.push({ batchId: batch.id, success: true, ...result });
@@ -333,10 +295,6 @@ const runAutoGmplCycle = async () => {
 };
 
 const startAutoGmplScheduler = () => {
-  backfillStaleGmplStatuses().catch((err) => {
-    console.error('[GMPL] Backfill error:', err.message);
-  });
-
   const config = getConfig();
 
   if (!config.enabled) {
@@ -350,7 +308,7 @@ const startAutoGmplScheduler = () => {
   }
 
   console.log(
-    `[GMPL Auto] Scheduler started (every ${config.intervalMs / 1000}s, min pending: ${config.minPending}, new pending orders only)`
+    `[GMPL Auto] Scheduler started (every ${config.intervalMs / 1000}s, min pending: ${config.minPending})`
   );
 
   setInterval(() => {
