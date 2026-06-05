@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, Outlet, useNavigate } from 'react-router-dom';
 import getSocket from './utils/socket';
 import Swal from 'sweetalert2';
@@ -6,20 +6,26 @@ import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
 
-import Login from './pages/Login';
-// import Register from './pages/';
-import AdminDashboard from './pages/AdminDashboard';
-import UserDashboard from './pages/UserDashboard';
-import Premium from './pages/Premium';
-import SuperAgent from './pages/SuperAgent';
-import NormalAgent from './pages/NormalAgent';
-import OtherDashboard from './pages/OtherDashboard';
-import Landing from './pages/Landing';
-import Profile from './pages/Profile';
-import Shop from './pages/Shop';
-import PublicStorefront from './pages/PublicStorefront';
 import BASE_URL from './endpoints/endpoints';
 import { getStoredAuth, normalizeRole, dashboardPathForRole } from './utils/auth';
+
+const Login = lazy(() => import('./pages/Login'));
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
+const UserDashboard = lazy(() => import('./pages/UserDashboard'));
+const Premium = lazy(() => import('./pages/Premium'));
+const SuperAgent = lazy(() => import('./pages/SuperAgent'));
+const NormalAgent = lazy(() => import('./pages/NormalAgent'));
+const OtherDashboard = lazy(() => import('./pages/OtherDashboard'));
+const Landing = lazy(() => import('./pages/Landing'));
+const Profile = lazy(() => import('./pages/Profile'));
+const Shop = lazy(() => import('./pages/Shop'));
+const PublicStorefront = lazy(() => import('./pages/PublicStorefront'));
+
+const PageLoader = () => (
+  <div className="min-h-screen flex items-center justify-center bg-dark-900">
+    <div className="w-8 h-8 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+  </div>
+);
 
 const AGENT_INACTIVITY_TIMEOUT = 30 * 60 * 1000; // 30 minutes for agents
 const ADMIN_INACTIVITY_TIMEOUT = 90 * 60 * 1000; // 1 hour 30 minutes for admin
@@ -150,43 +156,45 @@ function App() {
 
   return (
     <Router>
-      <Routes>
-        {/* Public Routes */}
-        <Route path="/" element={<Landing />} />
-        <Route path="/login" element={<Login />} />
-        {/* <Route path="/" element={<Register />} /> */}
-        <Route path="/shop" element={<Shop />} />
-        <Route path="/store/:slug" element={<PublicStorefront />} />
+      <Suspense fallback={<PageLoader />}>
+        <Routes>
+          {/* Public Routes */}
+          <Route path="/" element={<Landing />} />
+          <Route path="/login" element={<Login />} />
+          {/* <Route path="/" element={<Register />} /> */}
+          <Route path="/shop" element={<Shop />} />
+          <Route path="/store/:slug" element={<PublicStorefront />} />
 
-        {/* Protected Routes */}
-        <Route element={<PrivateRoute allowedRoles={['ADMIN']} />}>
-          <Route path="/admin" element={<AdminDashboard />} />
-        </Route>
-        <Route element={<PrivateRoute allowedRoles={['USER']} />}>
-          <Route path="/user" element={<UserDashboard />} />
-        </Route>
-        <Route element={<PrivateRoute allowedRoles={['PREMIUM']} />}>
-          <Route path="/premium" element={<Premium />} />
-        </Route>
-        <Route element={<PrivateRoute allowedRoles={['SUPER']} />}>
-          <Route path="/superagent" element={<SuperAgent />} />
-        </Route>
-        <Route element={<PrivateRoute allowedRoles={['NORMAL']} />}>
-          <Route path="/normalagent" element={<NormalAgent />} />
-        </Route>
-        <Route element={<PrivateRoute allowedRoles={['OTHER']} />}>
-          <Route path="/otherdashboard" element={<OtherDashboard />} />
-        </Route>
+          {/* Protected Routes */}
+          <Route element={<PrivateRoute allowedRoles={['ADMIN']} />}>
+            <Route path="/admin" element={<AdminDashboard />} />
+          </Route>
+          <Route element={<PrivateRoute allowedRoles={['USER']} />}>
+            <Route path="/user" element={<UserDashboard />} />
+          </Route>
+          <Route element={<PrivateRoute allowedRoles={['PREMIUM']} />}>
+            <Route path="/premium" element={<Premium />} />
+          </Route>
+          <Route element={<PrivateRoute allowedRoles={['SUPER']} />}>
+            <Route path="/superagent" element={<SuperAgent />} />
+          </Route>
+          <Route element={<PrivateRoute allowedRoles={['NORMAL']} />}>
+            <Route path="/normalagent" element={<NormalAgent />} />
+          </Route>
+          <Route element={<PrivateRoute allowedRoles={['OTHER']} />}>
+            <Route path="/otherdashboard" element={<OtherDashboard />} />
+          </Route>
 
-        {/* Profile Routes - Available to all authenticated users */}
-        <Route element={<PrivateRoute allowedRoles={['ADMIN', 'USER', 'PREMIUM', 'SUPER', 'NORMAL', 'OTHER']} />}>
-          <Route path="/profile" element={<Profile />} />
-        </Route>
+          {/* Profile Routes - Available to all authenticated users */}
+          <Route element={<PrivateRoute allowedRoles={['ADMIN', 'USER', 'PREMIUM', 'SUPER', 'NORMAL', 'OTHER']} />}>
+            <Route path="/profile" element={<Profile />} />
+          </Route>
 
-        {/* Fallback Route */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-      
+          {/* Fallback Route */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
+
       <ToastContainer
         position="top-right"
         autoClose={5000}

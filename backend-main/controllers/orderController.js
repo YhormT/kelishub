@@ -969,10 +969,7 @@ exports.cancelOrderItem = async (req, res) => {
 // ==================== ORDER BATCH (ORDER FILES) CONTROLLERS ====================
 
 const orderBatchService = require("../services/orderBatchService");
-const {
-  buildSupplierExcelBuffer,
-  submitRowsToGmpl,
-} = require("../utils/gmplOrderExport");
+const gmplAutoExportService = require("../services/gmplAutoExportService");
 
 exports.getPendingCounts = async (req, res) => {
   try {
@@ -992,34 +989,32 @@ exports.exportPendingOrders = async (req, res) => {
         .json({ success: false, message: "Network is required" });
 
     const adminUserId = req.user.id;
-    const { batch, rows } = await orderBatchService.exportPendingByNetwork(
+    const result = await gmplAutoExportService.exportPendingWithGmpl(
       adminUserId,
       network,
+      { submitToGmpl: submitToGmpl !== false },
     );
+    const { batch, buffer, gmplStatus, gmplError, gmplResult, gmplResponseId } =
+      result;
 
-    const buffer = buildSupplierExcelBuffer(rows);
-    const shouldSubmitGmpl =
-      submitToGmpl !== false && Boolean(process.env.GMPL_API_KEY);
-
-    if (shouldSubmitGmpl) {
-      try {
-        const gmplResult = await submitRowsToGmpl(rows, network);
-        res.setHeader("X-GMPL-Submitted", "true");
-        if (gmplResult && typeof gmplResult === "object") {
-          res.setHeader(
-            "X-GMPL-Batch-Id",
-            String(gmplResult.id || gmplResult.orderId || batch.id),
-          );
-        }
-      } catch (gmplErr) {
-        console.error("[exportPendingOrders] GMPL submit failed:", gmplErr.message);
-        res.setHeader("X-GMPL-Submitted", "false");
-        res.setHeader(
-          "X-GMPL-Error",
-          encodeURIComponent(gmplErr.message || "GMPL submit failed"),
-        );
+    if (gmplStatus === "submitted") {
+      res.setHeader("X-GMPL-Submitted", "true");
+      const gmplBatchId =
+        gmplResponseId ||
+        (gmplResult && typeof gmplResult === "object"
+          ? gmplResult.id || gmplResult.orderId
+          : null);
+      if (gmplBatchId) {
+        res.setHeader("X-GMPL-Batch-Id", String(gmplBatchId));
       }
-    } else if (!process.env.GMPL_API_KEY) {
+    } else if (gmplStatus === "failed") {
+      console.error("[exportPendingOrders] GMPL submit failed:", gmplError);
+      res.setHeader("X-GMPL-Submitted", "false");
+      res.setHeader(
+        "X-GMPL-Error",
+        encodeURIComponent(gmplError || "GMPL submit failed"),
+      );
+    } else {
       res.setHeader("X-GMPL-Submitted", "skipped");
     }
 
@@ -1041,27 +1036,25 @@ exports.exportPendingOrders = async (req, res) => {
 
 exports.submitBatchToGmpl = async (req, res) => {
   try {
-    const { batch, rows } = await orderBatchService.getBatchForDownload(
+    const result = await gmplAutoExportService.submitExistingBatchToGmpl(
       req.params.batchId,
+      { incrementRetry: true },
     );
-    const network = batch.network;
-    if (!network) {
-      return res.status(400).json({
-        success: false,
-        message: "Batch has no network label; cannot submit to GMPL.",
-      });
-    }
-
-    const gmplResult = await submitRowsToGmpl(rows, network);
-    res.json({
-      success: true,
-      message: `Batch #${batch.id} submitted to GMPL (${network}).`,
-      batchId: batch.id,
-      gmpl: gmplResult,
-    });
+    res.json(result);
   } catch (error) {
     console.error("[submitBatchToGmpl]", error.message);
     res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.getGmplAutoExportStatus = async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      autoExport: gmplAutoExportService.getAutoExportStatus(),
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 

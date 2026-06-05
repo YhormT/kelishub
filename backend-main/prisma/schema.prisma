@@ -106,20 +106,27 @@ model Order {
 }
 
 model OrderBatch {
-  id         Int         @id @default(autoincrement())
-  userId     Int
-  filename   String      @db.VarChar(255)
-  network    String?     @db.VarChar(50)
-  totalItems Int         @default(0)
-  totalPrice Float       @default(0)
-  status     String      @default("Pending")
-  createdAt  DateTime    @default(now())
-  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  orders     Order[]
-  items      OrderItem[]
+  id              Int         @id @default(autoincrement())
+  userId          Int
+  filename        String      @db.VarChar(255)
+  network         String?     @db.VarChar(50)
+  totalItems      Int         @default(0)
+  totalPrice      Float       @default(0)
+  status          String      @default("Pending")
+  gmplStatus      String      @default("pending") @db.VarChar(20)
+  gmplSubmittedAt DateTime?
+  gmplError       String?     @db.Text
+  gmplResponseId  String?     @db.VarChar(255)
+  gmplAutoExport  Boolean     @default(false)
+  gmplRetryCount  Int         @default(0)
+  createdAt       DateTime    @default(now())
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders          Order[]
+  items           OrderItem[]
 
   @@index([userId])
   @@index([status])
+  @@index([gmplStatus])
   @@index([createdAt])
   @@map("OrderBatch")
 }

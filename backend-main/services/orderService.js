@@ -1361,6 +1361,7 @@ const getOrderTrackerData = async (filters = {}) => {
           where: {
             reference: { in: references },
             type: "ORDER",
+            amount: { lt: 0 },
           },
           select: {
             reference: true,
@@ -1373,8 +1374,19 @@ const getOrderTrackerData = async (filters = {}) => {
 
   const txMap = {};
   for (const tx of transactions) {
-    txMap[tx.reference] = tx;
+    const ref = tx.reference;
+    const existing = txMap[ref];
+    if (!existing || Math.abs(tx.amount) > Math.abs(existing.amount || 0)) {
+      txMap[ref] = tx;
+    }
   }
+
+  const hasBalanceAudit = (tx) =>
+    tx != null &&
+    tx.previousBalance != null &&
+    tx.balance != null &&
+    !Number.isNaN(tx.previousBalance) &&
+    !Number.isNaN(tx.balance);
 
   // Fetch referral orders (storefront/Paystack-paid) linked to these orders
   const referralOrders =
@@ -1392,6 +1404,7 @@ const getOrderTrackerData = async (filters = {}) => {
 
   const tableData = [];
   const fraudAlerts = [];
+  const flaggedWalletOrders = new Set();
   const networkSummary = {
     mtn: { count: 0, total: 0 },
     telecel: { count: 0, total: 0 },
@@ -1478,16 +1491,16 @@ const getOrderTrackerData = async (filters = {}) => {
           reason: `Storefront order - payment not verified (${referral.paymentStatus})`,
         });
       }
-    } else {
-      // Wallet-based agent order — flag if balance unchanged or no transaction
-      if (tx && Math.abs(tx.previousBalance - tx.balance) < 0.01) {
+    } else if (hasBalanceAudit(tx)) {
+      // Only flag wallet orders when before/after balances are recorded.
+      // Deduction is per order (not per item); flag once per order.
+      if (
+        price > 0 &&
+        Math.abs(tx.previousBalance - tx.balance) < 0.01 &&
+        !flaggedWalletOrders.has(item.orderId)
+      ) {
+        flaggedWalletOrders.add(item.orderId);
         fraudAlerts.push({ ...row, reason: "Balance unchanged after order" });
-      }
-      if (!tx) {
-        fraudAlerts.push({
-          ...row,
-          reason: "No transaction record found for order",
-        });
       }
     }
   }
