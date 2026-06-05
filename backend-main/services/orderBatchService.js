@@ -31,11 +31,119 @@ const getPendingCountsByNetwork = async () => {
 };
 
 /**
- * Export pending orders by network: creates a batch, links orders, auto-sets to Processing
+ * Pending purchaser orders not yet exported (for admin queue display)
  */
-const exportPendingByNetwork = async (adminUserId, network) => {
+const getPendingQueue = async () => {
+  const items = await prisma.orderItem.findMany({
+    where: {
+      status: "Pending",
+      batchId: null,
+    },
+    orderBy: { order: { createdAt: "desc" } },
+    take: 200,
+    select: {
+      id: true,
+      orderId: true,
+      mobileNumber: true,
+      productName: true,
+      productPrice: true,
+      quantity: true,
+      product: { select: { name: true, price: true } },
+      order: {
+        select: {
+          createdAt: true,
+          mobileNumber: true,
+          user: { select: { id: true, name: true, phone: true } },
+        },
+      },
+    },
+  });
+
+  const networks = {
+    MTN: { count: 0, total: 0, items: [] },
+    TELECEL: { count: 0, total: 0, items: [] },
+    "AIRTEL TIGO": { count: 0, total: 0, items: [] },
+  };
+
+  for (const item of items) {
+    const name = (item.productName || item.product?.name || "").toUpperCase();
+    let network = null;
+    for (const net of Object.keys(networks)) {
+      if (name.startsWith(net)) {
+        network = net;
+        break;
+      }
+    }
+    if (!network) continue;
+
+    const price =
+      (item.productPrice != null ? item.productPrice : item.product?.price || 0) *
+      item.quantity;
+
+    networks[network].count++;
+    networks[network].total += price;
+    networks[network].items.push({
+      itemId: item.id,
+      orderId: item.orderId,
+      agentName:
+        item.order?.user?.name ||
+        item.order?.user?.phone ||
+        "N/A",
+      phone: item.mobileNumber || item.order?.mobileNumber || "",
+      product: item.productName || item.product?.name || "N/A",
+      price,
+      createdAt: item.order?.createdAt,
+    });
+  }
+
+  return networks;
+};
+
+/**
+ * Pending purchaser orders (distinct orderId) per network — for auto-export gating.
+ */
+const getPendingOrderCountsByNetwork = async () => {
+  const items = await prisma.orderItem.findMany({
+    where: {
+      status: "Pending",
+      batchId: null,
+    },
+    select: {
+      orderId: true,
+      productName: true,
+      product: { select: { name: true } },
+    },
+  });
+
+  const orderSets = {
+    MTN: new Set(),
+    TELECEL: new Set(),
+    "AIRTEL TIGO": new Set(),
+  };
+
+  for (const item of items) {
+    const name = (item.productName || item.product?.name || "").toUpperCase();
+    for (const net of Object.keys(orderSets)) {
+      if (name.startsWith(net)) {
+        orderSets[net].add(item.orderId);
+        break;
+      }
+    }
+  }
+
+  return {
+    MTN: { count: orderSets.MTN.size },
+    TELECEL: { count: orderSets.TELECEL.size },
+    "AIRTEL TIGO": { count: orderSets["AIRTEL TIGO"].size },
+  };
+};
+
+/**
+ * Export pending orders by network — one batch per purchaser order (not one mega-batch).
+ * @param {number|null|undefined} maxOrders — cap orders exported this run (FIFO). Omit/null = all pending orders.
+ */
+const exportPendingByNetwork = async (adminUserId, network, { maxOrders } = {}) => {
   return await prisma.$transaction(async (tx) => {
-    // Find pending items matching the network that have NOT been assigned to any batch
     const pendingItems = await tx.orderItem.findMany({
       where: {
         status: "Pending",
@@ -49,66 +157,98 @@ const exportPendingByNetwork = async (adminUserId, network) => {
       include: {
         order: { include: { user: { select: { id: true, name: true, phone: true } } } },
         product: { select: { id: true, name: true, description: true, price: true } }
-      }
+      },
+      orderBy: { order: { createdAt: "asc" } }
     });
 
     if (pendingItems.length === 0) {
       throw new Error(`No pending orders found for ${network}`);
     }
 
-    const orderIdSet = new Set(pendingItems.map(item => item.orderId));
-    const orderIds = [...orderIdSet];
-
-    let totalPrice = 0;
+    const byOrder = new Map();
     for (const item of pendingItems) {
-      totalPrice += (item.productPrice || item.product.price) * item.quantity;
+      if (!byOrder.has(item.orderId)) byOrder.set(item.orderId, []);
+      byOrder.get(item.orderId).push(item);
     }
 
-    const filename = `${network.toUpperCase()}_export_${new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')}.xlsx`;
-    const batch = await tx.orderBatch.create({
-      data: {
-        userId: parseInt(adminUserId),
-        filename,
-        network: network.toUpperCase(),
-        totalItems: pendingItems.length,
-        totalPrice,
-        status: "Pending"
+    const exportStamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
+    const batches = [];
+
+    const createBatchForOrder = async (orderId, items) => {
+      let totalPrice = 0;
+      for (const item of items) {
+        totalPrice += (item.productPrice || item.product.price) * item.quantity;
       }
-    });
 
-    // Link orders to the batch (only if not already linked to another batch)
-    await tx.order.updateMany({
-      where: { id: { in: orderIds }, batchId: null },
-      data: { batchId: batch.id }
-    });
+      const filename = `${network.toUpperCase()}_order_${orderId}_${exportStamp}.xlsx`;
+      const batch = await tx.orderBatch.create({
+        data: {
+          userId: parseInt(adminUserId),
+          filename,
+          network: network.toUpperCase(),
+          totalItems: items.length,
+          totalPrice,
+          status: "Pending"
+        }
+      });
 
-    // Set batchId on each exported item AND update status to Processing
-    const itemIds = pendingItems.map(item => item.id);
-    await tx.orderItem.updateMany({
-      where: { id: { in: itemIds } },
-      data: { status: "Processing", batchId: batch.id }
-    });
+      await tx.order.updateMany({
+        where: { id: orderId, batchId: null },
+        data: { batchId: batch.id }
+      });
 
-    // Update the batch status to Processing as well
-    await tx.orderBatch.update({
-      where: { id: batch.id },
-      data: { status: "Processing" }
-    });
+      const itemIds = items.map((item) => item.id);
+      await tx.orderItem.updateMany({
+        where: { id: { in: itemIds } },
+        data: { status: "Processing", batchId: batch.id }
+      });
 
-    const rows = pendingItems.map(item => ({
-      orderId: item.orderId,
-      itemId: item.id,
-      agent: item.order.user?.name || "N/A",
-      phone: item.mobileNumber || item.order.mobileNumber || "",
-      product: item.productName || item.product.name,
-      bundle: item.productDescription || item.product.description,
-      price: item.productPrice || item.product.price,
-      quantity: item.quantity,
-      status: "Processing"
-    }));
+      await tx.orderBatch.update({
+        where: { id: batch.id },
+        data: { status: "Processing" }
+      });
 
-    return { batch, rows, totalItems: pendingItems.length, totalPrice };
-  }, { timeout: 30000 });
+      const rows = items.map((item) => ({
+        orderId: item.orderId,
+        itemId: item.id,
+        agent: item.order.user?.name || "N/A",
+        phone: item.mobileNumber || item.order.mobileNumber || "",
+        product: item.productName || item.product.name,
+        bundle: item.productDescription || item.product.description,
+        price: item.productPrice || item.product.price,
+        quantity: item.quantity,
+        status: "Processing"
+      }));
+
+      return { batch, rows, orderId, totalPrice, totalItems: items.length };
+    };
+
+    const orderEntries = [...byOrder.entries()];
+    const orderLimit =
+      maxOrders != null && maxOrders > 0
+        ? Math.min(maxOrders, orderEntries.length)
+        : orderEntries.length;
+    const ordersToExport = orderEntries.slice(0, orderLimit);
+
+    for (const [orderId, items] of ordersToExport) {
+      batches.push(await createBatchForOrder(orderId, items));
+    }
+
+    const allRows = batches.flatMap((b) => b.rows);
+    const totalPrice = batches.reduce((sum, b) => sum + b.totalPrice, 0);
+    const exportedItemCount = batches.reduce((sum, b) => sum + b.totalItems, 0);
+
+    return {
+      batches,
+      batch: batches[0]?.batch,
+      rows: allRows,
+      totalItems: exportedItemCount,
+      totalPrice,
+      orderCount: batches.length,
+      pendingOrderCount: orderEntries.length,
+      remainingPendingOrders: Math.max(0, orderEntries.length - batches.length),
+    };
+  }, { timeout: 60000 });
 };
 
 /**
@@ -239,6 +379,13 @@ const getBatchById = async (batchId) => {
     orderMap.get(orderId).items.push(item);
   }
   batch.orders = [...orderMap.values()];
+
+  const statusCounts = { Pending: 0, Processing: 0, Completed: 0, Cancelled: 0 };
+  for (const item of batch.items) {
+    const s = item.status === 'Canceled' ? 'Cancelled' : item.status;
+    if (statusCounts[s] !== undefined) statusCounts[s]++;
+  }
+  batch.statusCounts = statusCounts;
 
   return batch;
 };
@@ -395,6 +542,8 @@ const getBatchForDownload = async (batchId) => {
 
 module.exports = {
   getPendingCountsByNetwork,
+  getPendingOrderCountsByNetwork,
+  getPendingQueue,
   exportPendingByNetwork,
   getAllBatches,
   getBatchById,

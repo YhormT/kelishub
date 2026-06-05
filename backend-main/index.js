@@ -294,3 +294,5 @@ setTimeout(() => {
 
 const { startAutoGmplScheduler } = require('./services/gmplAutoExportService');
 startAutoGmplScheduler();
+const { startGmplStatusSyncScheduler } = require('./services/gmplStatusSyncService');
+startGmplStatusSyncScheduler();

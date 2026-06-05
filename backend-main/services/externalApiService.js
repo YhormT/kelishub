@@ -6,6 +6,8 @@ const { createTransaction } = require('./transactionService');
 const productService = require('./productService');
 const { parseSimplifiedExcelRows } = require('./orderExcelParser');
 const gmplService = require('./gmplService');
+const { isGmplNetwork } = require('../utils/gmplNetwork');
+const { summarizeOrderItems } = require('../utils/orderEvents');
 
 const generateApiKey = () => {
   return 'klh_' + crypto.randomBytes(32).toString('hex');
@@ -250,6 +252,7 @@ const createExternalOrder = async (partnerId, items) => {
         status: order.status,
         totalPrice,
         walletBalanceAfter: agent.loanBalance - totalPrice,
+        networks: summarizeOrderItems(order.items),
         items: order.items.map((item) => ({
           id: item.id,
           productId: item.productId,
@@ -311,6 +314,12 @@ const createExternalFileOrder = async (partnerId, filePath, networkProvider) => 
     );
   }
 
+  if (!isGmplNetwork(network)) {
+    throw new Error(
+      'GMPL file orders are only supported for MTN (network_provider=mtn).'
+    );
+  }
+
   let gmplResult = null;
   try {
     gmplResult = await gmplService.submitAgentOrderFile(filePath, network);
@@ -369,6 +378,7 @@ const createExternalFileOrder = async (partnerId, filePath, networkProvider) => 
           status: order.status,
           totalPrice: totalCost,
           itemCount: order.items.length,
+          networks: summarizeOrderItems(order.items),
           networkProvider: network.toLowerCase(),
           gmpl: gmplResult,
           walletBalanceAfter: freshAgent.loanBalance - totalCost,

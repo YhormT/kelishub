@@ -14,6 +14,10 @@ const templatePath = path.join(
 
 // Route to download the Excel template
 const router = express.Router();
+
+// GMPL fulfillment webhook (optional shared secret — no admin auth)
+router.post("/gmpl/webhook", orderController.handleGmplWebhook);
+
 router.get("/download-template", (req, res) => {
   res.download(templatePath, "order_upload_template.xlsx");
 });
@@ -93,6 +97,12 @@ router.get(
   orderController.getPendingCounts,
 );
 router.get(
+  "/admin/batches/pending-queue",
+  authMiddleware,
+  adminMiddleware,
+  orderController.getPendingQueue,
+);
+router.get(
   "/admin/gmpl/auto-export",
   authMiddleware,
   adminMiddleware,
@@ -116,6 +126,12 @@ router.post(
   adminMiddleware,
   upload.single("orderFile"),
   orderController.submitAdminGmplFile,
+);
+router.post(
+  "/admin/batches/:batchId/sync-gmpl-status",
+  authMiddleware,
+  adminMiddleware,
+  orderController.syncGmplBatchStatus,
 );
 router.get(
   "/admin/batches",
