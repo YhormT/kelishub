@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import BASE_URL from '../endpoints/endpoints';
 import getSocket from '../utils/socket';
-import { FileText, Download, ChevronLeft, RefreshCw, Loader2, Search, X, CheckCircle, Clock, XCircle, Upload, Send } from 'lucide-react';
+import { FileText, Download, ChevronLeft, RefreshCw, Loader2, Search, X, CheckCircle, Clock, XCircle, Upload, Send, Zap, AlertTriangle } from 'lucide-react';
 import Swal from 'sweetalert2';
 
 const getAuthHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
@@ -35,6 +35,25 @@ const networkColors = {
   'AIRTEL TIGO': { bg: 'from-blue-500/10 to-blue-600/10', border: 'border-blue-500/30', text: 'text-blue-400', btn: 'from-blue-500 to-blue-600' },
 };
 
+const gmplStatusConfig = {
+  submitted: { label: 'GMPL OK', className: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20', icon: CheckCircle },
+  failed: { label: 'GMPL Failed', className: 'bg-red-500/10 text-red-400 border-red-500/20', icon: AlertTriangle },
+  pending: { label: 'GMPL Pending', className: 'bg-amber-500/10 text-amber-400 border-amber-500/20', icon: Clock },
+  skipped: { label: 'GMPL Skipped', className: 'bg-dark-600/50 text-dark-400 border-dark-600', icon: XCircle },
+};
+
+const GmplStatusBadge = ({ status, autoExport }) => {
+  const cfg = gmplStatusConfig[status] || gmplStatusConfig.pending;
+  const Icon = cfg.icon;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium border ${cfg.className}`}>
+      <Icon className="w-3 h-3" />
+      {cfg.label}
+      {autoExport && <span className="opacity-70">· auto</span>}
+    </span>
+  );
+};
+
 const OrderFiles = () => {
   const [batches, setBatches] = useState([]);
   const [pendingCounts, setPendingCounts] = useState({});
@@ -50,6 +69,7 @@ const OrderFiles = () => {
   const [gmplFile, setGmplFile] = useState(null);
   const [gmplNetwork, setGmplNetwork] = useState('');
   const [submittingGmplBatchId, setSubmittingGmplBatchId] = useState(null);
+  const [autoExportConfig, setAutoExportConfig] = useState(null);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 15, total: 0, totalPages: 1 });
   const perPage = 15;
@@ -77,8 +97,20 @@ const OrderFiles = () => {
     }
   }, [page]);
 
+  const fetchAutoExportConfig = useCallback(async () => {
+    try {
+      const res = await axios.get(`${BASE_URL}/order/admin/gmpl/auto-export`, { headers: getAuthHeaders() });
+      if (res.data.success) setAutoExportConfig(res.data.autoExport);
+    } catch (err) {
+      console.error('Error fetching GMPL auto-export config:', err);
+    }
+  }, []);
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { fetchBatches(1); }, []);
+  useEffect(() => {
+    fetchBatches(1);
+    fetchAutoExportConfig();
+  }, []);
 
   // WebSocket: auto-refresh when new orders are submitted
   useEffect(() => {
@@ -214,6 +246,8 @@ const OrderFiles = () => {
           color: '#fff',
           confirmButtonColor: '#06b6d4',
         });
+        fetchBatches(page, true);
+        if (selectedBatch === batchId) fetchBatchDetail(batchId);
       }
     } catch (err) {
       Swal.fire({
@@ -381,17 +415,28 @@ const OrderFiles = () => {
                 Batch #{batchDetail.id} &mdash; {batchDetail.network || 'Unknown'}
               </h2>
               <p className="text-dark-400 text-sm">Exported: {formatDate(batchDetail.createdAt)}</p>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <GmplStatusBadge status={batchDetail.gmplStatus} autoExport={batchDetail.gmplAutoExport} />
+                {batchDetail.gmplSubmittedAt && (
+                  <span className="text-dark-500 text-xs">Submitted {formatDate(batchDetail.gmplSubmittedAt)}</span>
+                )}
+              </div>
+              {batchDetail.gmplStatus === 'failed' && batchDetail.gmplError && (
+                <p className="text-red-400 text-xs mt-1 max-w-xl">{batchDetail.gmplError}</p>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => handleSubmitBatchToGmpl(batchDetail.id)}
-              disabled={submittingGmplBatchId === batchDetail.id}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 hover:bg-emerald-500/20 text-sm disabled:opacity-50"
-            >
-              {submittingGmplBatchId === batchDetail.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              Send to GMPL
-            </button>
+            {batchDetail.gmplStatus !== 'submitted' && (
+              <button
+                onClick={() => handleSubmitBatchToGmpl(batchDetail.id)}
+                disabled={submittingGmplBatchId === batchDetail.id}
+                className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 hover:bg-emerald-500/20 text-sm disabled:opacity-50"
+              >
+                {submittingGmplBatchId === batchDetail.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                {batchDetail.gmplStatus === 'failed' ? 'Retry GMPL' : 'Send to GMPL'}
+              </button>
+            )}
             <button onClick={() => handleRedownload(batchDetail.id, batchDetail.filename)} className="flex items-center gap-2 px-4 py-2 bg-dark-800 border border-dark-600 rounded-xl text-dark-300 hover:text-white hover:bg-dark-700 text-sm">
               <Download className="w-4 h-4" /> Re-download
             </button>
@@ -478,13 +523,29 @@ const OrderFiles = () => {
         </button>
       </div>
 
-      {/* Direct GMPL upload (admin) */}
+      {autoExportConfig?.enabled && autoExportConfig?.configured && (
+        <div className="bg-gradient-to-r from-cyan-500/10 to-emerald-500/10 border border-cyan-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
+          <Zap className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-white font-medium text-sm">GMPL auto-export is active</p>
+            <p className="text-dark-400 text-xs mt-1">
+              Pending orders are exported and sent to GMPL every {Math.round(autoExportConfig.intervalMs / 60000)} min
+              (min {autoExportConfig.minPendingCount} per network).
+              Failed batches auto-retry up to {autoExportConfig.maxRetries} times.
+              Use manual actions below if a submission still fails.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Direct GMPL upload (admin) — manual fallback */}
       <div className="bg-dark-800 border border-emerald-500/20 rounded-2xl p-5 mb-6">
         <h3 className="text-white font-semibold flex items-center gap-2 mb-3">
           <Upload className="w-5 h-5 text-emerald-400" />
           Submit Excel to GMPL
+          <span className="text-dark-500 text-xs font-normal ml-1">Manual fallback</span>
         </h3>
-        <p className="text-dark-400 text-sm mb-4">Upload a supplier-format file (Phone + Data Size) without exporting a batch.</p>
+        <p className="text-dark-400 text-sm mb-4">Upload a supplier-format file (Phone + Data Size) when auto-export or batch retry did not go through.</p>
         <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
           <select
             value={gmplNetwork}
@@ -578,6 +639,7 @@ const OrderFiles = () => {
                   <th className="px-4 py-3 text-center text-dark-400 font-medium">Orders</th>
                   <th className="px-4 py-3 text-right text-dark-400 font-medium">Total Price</th>
                   <th className="px-4 py-3 text-center text-dark-400 font-medium">Status</th>
+                  <th className="px-4 py-3 text-center text-dark-400 font-medium">GMPL</th>
                   <th className="px-4 py-3 text-center text-dark-400 font-medium">Actions</th>
                 </tr>
               </thead>
@@ -603,9 +665,22 @@ const OrderFiles = () => {
                           <StatusIcon className="w-3 h-3" /> {batch.status}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-center">
+                        <GmplStatusBadge status={batch.gmplStatus} autoExport={batch.gmplAutoExport} />
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-center gap-1.5">
                           <button onClick={() => fetchBatchDetail(batch.id)} className="px-2.5 py-1.5 bg-dark-700 text-dark-300 rounded-lg hover:bg-dark-600 hover:text-white text-xs transition-colors">View</button>
+                          {batch.gmplStatus === 'failed' && (
+                            <button
+                              onClick={() => handleSubmitBatchToGmpl(batch.id)}
+                              disabled={submittingGmplBatchId === batch.id}
+                              className="px-2.5 py-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-lg hover:bg-emerald-500/20 text-xs transition-colors disabled:opacity-50"
+                              title={batch.gmplError || 'Retry GMPL'}
+                            >
+                              {submittingGmplBatchId === batch.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                            </button>
+                          )}
                           <button onClick={() => handleBulkStatusUpdate(batch.id)} className="px-2.5 py-1.5 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 rounded-lg hover:bg-cyan-500/20 text-xs transition-colors">Status</button>
                           <button onClick={() => handleRedownload(batch.id, batch.filename)} className="px-2.5 py-1.5 bg-dark-700 text-dark-300 rounded-lg hover:bg-dark-600 hover:text-white text-xs transition-colors" title="Re-download">
                             <Download className="w-3.5 h-3.5" />

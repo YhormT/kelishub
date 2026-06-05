@@ -92,6 +92,12 @@ router.get(
   adminMiddleware,
   orderController.getPendingCounts,
 );
+router.get(
+  "/admin/gmpl/auto-export",
+  authMiddleware,
+  adminMiddleware,
+  orderController.getGmplAutoExportStatus,
+);
 router.post(
   "/admin/batches/export",
   authMiddleware,

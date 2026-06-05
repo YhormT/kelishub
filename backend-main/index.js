@@ -291,3 +291,6 @@ setInterval(() => {
 setTimeout(() => {
   storefrontService.cleanupStalePendingReferrals().catch(() => {});
 }, 90 * 1000);
+
+const { startAutoGmplScheduler } = require('./services/gmplAutoExportService');
+startAutoGmplScheduler();

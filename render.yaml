@@ -44,6 +44,16 @@ services:
         value: https://api.gmpl.com
       - key: GMPL_API_KEY
         sync: false
+      - key: GMPL_AUTO_EXPORT
+        value: "true"
+      - key: GMPL_AUTO_INTERVAL_MS
+        value: "300000"
+      - key: GMPL_MIN_PENDING_COUNT
+        value: "1"
+      - key: GMPL_AUTO_RETRY_FAILED
+        value: "true"
+      - key: GMPL_AUTO_MAX_RETRIES
+        value: "3"
 
   # ── Frontend (Vite static site) ───────────────────────────────────────
   - type: web
