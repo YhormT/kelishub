@@ -161,7 +161,17 @@ app.use(
     },
   })
 );
-app.use(cors());
+app.use(
+  cors({
+    exposedHeaders: [
+      'Content-Disposition',
+      'X-Batch-Id',
+      'X-GMPL-Submitted',
+      'X-GMPL-Error',
+      'X-GMPL-Batch-Id',
+    ],
+  })
+);
 app.use(helmet());
 
 // Root route for Render / load balancer health check

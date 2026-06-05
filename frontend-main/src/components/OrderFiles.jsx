@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import BASE_URL from '../endpoints/endpoints';
 import getSocket from '../utils/socket';
-import { FileText, Download, ChevronLeft, RefreshCw, Loader2, Search, X, CheckCircle, Clock, XCircle } from 'lucide-react';
+import { FileText, Download, ChevronLeft, RefreshCw, Loader2, Search, X, CheckCircle, Clock, XCircle, Upload, Send } from 'lucide-react';
 import Swal from 'sweetalert2';
 
 const getAuthHeaders = () => ({ Authorization: `Bearer ${localStorage.getItem('token')}` });
@@ -46,6 +46,10 @@ const OrderFiles = () => {
   const [batchDetail, setBatchDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [statusUpdateLoading, setStatusUpdateLoading] = useState(false);
+  const [gmplUploading, setGmplUploading] = useState(false);
+  const [gmplFile, setGmplFile] = useState(null);
+  const [gmplNetwork, setGmplNetwork] = useState('');
+  const [submittingGmplBatchId, setSubmittingGmplBatchId] = useState(null);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 15, total: 0, totalPages: 1 });
   const perPage = 15;
@@ -116,10 +120,10 @@ const OrderFiles = () => {
 
     const confirm = await Swal.fire({
       title: `Export ${network} Orders`,
-      html: `<p style="color:#94a3b8">Download <b style="color:#fff">${count}</b> pending ${network} orders as Excel?</p><p style="color:#94a3b8;margin-top:8px">This will create a batch and set orders to Processing.</p>`,
+      html: `<p style="color:#94a3b8">Export <b style="color:#fff">${count}</b> pending ${network} orders.</p><p style="color:#94a3b8;margin-top:8px">Creates a batch, sets orders to Processing, downloads Excel, and submits the file to <b style="color:#fff">GMPL</b> when configured.</p>`,
       icon: 'question',
       showCancelButton: true,
-      confirmButtonText: 'Export & Download',
+      confirmButtonText: 'Export & Send to GMPL',
       confirmButtonColor: '#06b6d4',
       background: '#1a1a2e',
       color: '#fff',
@@ -128,10 +132,11 @@ const OrderFiles = () => {
 
     try {
       setExporting(network);
-      const res = await axios.post(`${BASE_URL}/order/admin/batches/export`, { network }, {
-        headers: getAuthHeaders(),
-        responseType: 'blob',
-      });
+      const res = await axios.post(
+        `${BASE_URL}/order/admin/batches/export`,
+        { network, submitToGmpl: true },
+        { headers: getAuthHeaders(), responseType: 'blob' }
+      );
 
       const contentDisp = res.headers['content-disposition'];
       let filename = `${network}_export.xlsx`;
@@ -149,13 +154,116 @@ const OrderFiles = () => {
       link.remove();
       window.URL.revokeObjectURL(url);
 
-      Swal.fire({ title: 'Exported', text: `${count} ${network} orders exported & set to Processing`, icon: 'success', background: '#1a1a2e', color: '#fff', confirmButtonColor: '#06b6d4', timer: 2000 });
+      const gmplSubmitted = res.headers['x-gmpl-submitted'];
+      const gmplError = res.headers['x-gmpl-error'];
+      const batchId = res.headers['x-batch-id'];
+
+      if (gmplSubmitted === 'true') {
+        Swal.fire({
+          title: 'Exported & sent to GMPL',
+          text: `Batch #${batchId || '—'}: ${count} ${network} orders processing.`,
+          icon: 'success',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+        });
+      } else if (gmplSubmitted === 'false' && gmplError) {
+        const errMsg = decodeURIComponent(gmplError);
+        Swal.fire({
+          title: 'Exported — GMPL failed',
+          html: `<p>Batch #${batchId || '—'} created and Excel downloaded.</p><p class="text-sm mt-2 text-red-300">${errMsg}</p><p class="text-sm mt-2">Use <b>Send to GMPL</b> on the batch to retry.</p>`,
+          icon: 'warning',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+        });
+      } else {
+        Swal.fire({
+          title: 'Exported',
+          text: `${count} ${network} orders exported (GMPL skipped — key not set).`,
+          icon: 'success',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+          timer: 2500,
+        });
+      }
       fetchBatches(1, true);
     } catch (err) {
       const msg = err.response?.status === 404 ? `No pending orders for ${network}` : 'Export failed';
       Swal.fire({ title: 'Error', text: msg, icon: 'error', background: '#1a1a2e', color: '#fff' });
     } finally {
       setExporting(null);
+    }
+  };
+
+  const handleSubmitBatchToGmpl = async (batchId) => {
+    try {
+      setSubmittingGmplBatchId(batchId);
+      const res = await axios.post(
+        `${BASE_URL}/order/admin/batches/${batchId}/submit-gmpl`,
+        {},
+        { headers: getAuthHeaders() }
+      );
+      if (res.data.success) {
+        Swal.fire({
+          title: 'Sent to GMPL',
+          text: res.data.message || 'Supplier accepted the batch file.',
+          icon: 'success',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+        });
+      }
+    } catch (err) {
+      Swal.fire({
+        title: 'GMPL failed',
+        text: err.response?.data?.message || 'Could not submit batch to GMPL.',
+        icon: 'error',
+        background: '#1a1a2e',
+        color: '#fff',
+      });
+    } finally {
+      setSubmittingGmplBatchId(null);
+    }
+  };
+
+  const handleAdminGmplUpload = async () => {
+    if (!gmplFile || !gmplNetwork) {
+      Swal.fire({ title: 'Missing fields', text: 'Select a network and Excel file.', icon: 'warning', background: '#1a1a2e', color: '#fff' });
+      return;
+    }
+    const formData = new FormData();
+    formData.append('orderFile', gmplFile);
+    formData.append('network', gmplNetwork);
+
+    try {
+      setGmplUploading(true);
+      const res = await axios.post(`${BASE_URL}/order/admin/gmpl/submit`, formData, {
+        headers: { ...getAuthHeaders(), 'Content-Type': 'multipart/form-data' },
+      });
+      if (res.data.success) {
+        Swal.fire({
+          title: 'GMPL accepted file',
+          text: res.data.message || 'Order file submitted to supplier.',
+          icon: 'success',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+        });
+        setGmplFile(null);
+        setGmplNetwork('');
+      }
+    } catch (err) {
+      Swal.fire({
+        title: 'GMPL upload failed',
+        text: err.response?.data?.message || 'Supplier rejected the file.',
+        icon: 'error',
+        background: '#1a1a2e',
+        color: '#fff',
+      });
+    } finally {
+      setGmplUploading(false);
     }
   };
 
@@ -276,6 +384,14 @@ const OrderFiles = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleSubmitBatchToGmpl(batchDetail.id)}
+              disabled={submittingGmplBatchId === batchDetail.id}
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400 hover:bg-emerald-500/20 text-sm disabled:opacity-50"
+            >
+              {submittingGmplBatchId === batchDetail.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              Send to GMPL
+            </button>
             <button onClick={() => handleRedownload(batchDetail.id, batchDetail.filename)} className="flex items-center gap-2 px-4 py-2 bg-dark-800 border border-dark-600 rounded-xl text-dark-300 hover:text-white hover:bg-dark-700 text-sm">
               <Download className="w-4 h-4" /> Re-download
             </button>
@@ -355,11 +471,47 @@ const OrderFiles = () => {
             <FileText className="w-6 h-6 text-cyan-400" />
             Order Files
           </h2>
-          <p className="text-dark-400 text-sm mt-1">Export pending orders by network and manage exported batches</p>
+          <p className="text-dark-400 text-sm mt-1">Export pending orders, submit to GMPL, and manage batches</p>
         </div>
         <button onClick={() => fetchBatches(page)} disabled={loading} className="flex items-center gap-2 px-4 py-2 bg-dark-800 border border-dark-600 rounded-xl text-dark-300 hover:text-white hover:bg-dark-700 text-sm">
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Refresh
         </button>
+      </div>
+
+      {/* Direct GMPL upload (admin) */}
+      <div className="bg-dark-800 border border-emerald-500/20 rounded-2xl p-5 mb-6">
+        <h3 className="text-white font-semibold flex items-center gap-2 mb-3">
+          <Upload className="w-5 h-5 text-emerald-400" />
+          Submit Excel to GMPL
+        </h3>
+        <p className="text-dark-400 text-sm mb-4">Upload a supplier-format file (Phone + Data Size) without exporting a batch.</p>
+        <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
+          <select
+            value={gmplNetwork}
+            onChange={(e) => setGmplNetwork(e.target.value)}
+            className="px-3 py-2.5 bg-dark-900 border border-dark-600 rounded-xl text-white text-sm min-w-[140px]"
+          >
+            <option value="">Network</option>
+            <option value="MTN">MTN</option>
+            <option value="TELECEL">Telecel</option>
+            <option value="AIRTEL TIGO">Airtel Tigo</option>
+          </select>
+          <input
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            onChange={(e) => setGmplFile(e.target.files?.[0] || null)}
+            className="text-sm text-dark-300 file:mr-3 file:py-2 file:px-3 file:rounded-lg file:border-0 file:bg-dark-700 file:text-white"
+          />
+          <button
+            type="button"
+            onClick={handleAdminGmplUpload}
+            disabled={gmplUploading}
+            className="flex items-center justify-center gap-2 px-5 py-2.5 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white rounded-xl text-sm font-medium disabled:opacity-50"
+          >
+            {gmplUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+            {gmplUploading ? 'Sending...' : 'Send to GMPL'}
+          </button>
+        </div>
       </div>
 
       {/* Network export cards */}
@@ -384,7 +536,7 @@ const OrderFiles = () => {
                 className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r ${colors.btn} text-white rounded-xl font-medium text-sm hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity`}
               >
                 {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                {isExporting ? 'Exporting...' : 'Export & Download'}
+                {isExporting ? 'Exporting...' : 'Export & GMPL'}
               </button>
             </div>
           );
