@@ -40,7 +40,12 @@ const gmplStatusConfig = {
   failed: { label: 'GMPL Failed', className: 'bg-red-500/10 text-red-400 border-red-500/20', icon: AlertTriangle },
   pending: { label: 'GMPL Pending', className: 'bg-amber-500/10 text-amber-400 border-amber-500/20', icon: Clock },
   skipped: { label: 'GMPL Skipped', className: 'bg-dark-600/50 text-dark-400 border-dark-600', icon: XCircle },
+  not_applicable: { label: 'Manual', className: 'bg-dark-600/50 text-dark-400 border-dark-600', icon: CheckCircle },
 };
+
+const canSubmitToGmpl = (batch) =>
+  batch.gmplStatus === 'failed' ||
+  (batch.gmplStatus === 'pending' && !['Completed', 'Cancelled'].includes(batch.status));
 
 const GmplStatusBadge = ({ status, autoExport }) => {
   const cfg = gmplStatusConfig[status] || gmplStatusConfig.pending;
@@ -427,7 +432,7 @@ const OrderFiles = () => {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {batchDetail.gmplStatus !== 'submitted' && (
+            {canSubmitToGmpl(batchDetail) && (
               <button
                 onClick={() => handleSubmitBatchToGmpl(batchDetail.id)}
                 disabled={submittingGmplBatchId === batchDetail.id}
@@ -671,12 +676,12 @@ const OrderFiles = () => {
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-center gap-1.5">
                           <button onClick={() => fetchBatchDetail(batch.id)} className="px-2.5 py-1.5 bg-dark-700 text-dark-300 rounded-lg hover:bg-dark-600 hover:text-white text-xs transition-colors">View</button>
-                          {batch.gmplStatus === 'failed' && (
+                          {canSubmitToGmpl(batch) && (
                             <button
                               onClick={() => handleSubmitBatchToGmpl(batch.id)}
                               disabled={submittingGmplBatchId === batch.id}
                               className="px-2.5 py-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-lg hover:bg-emerald-500/20 text-xs transition-colors disabled:opacity-50"
-                              title={batch.gmplError || 'Retry GMPL'}
+                              title={batch.gmplError || (batch.gmplStatus === 'failed' ? 'Retry GMPL' : 'Send to GMPL')}
                             >
                               {submittingGmplBatchId === batch.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
                             </button>
