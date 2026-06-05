@@ -50,10 +50,18 @@ services:
         value: "300000"
       - key: GMPL_MIN_PENDING_COUNT
         value: "1"
+      - key: GMPL_MAX_ORDERS_PER_CYCLE
+        value: "3"
       - key: GMPL_AUTO_RETRY_FAILED
         value: "true"
       - key: GMPL_AUTO_MAX_RETRIES
         value: "3"
+      - key: GMPL_STATUS_SYNC
+        value: "true"
+      - key: GMPL_STATUS_SYNC_INTERVAL_MS
+        value: "180000"
+      - key: GMPL_WEBHOOK_SECRET
+        sync: false
 
   # ── Frontend (Vite static site) ───────────────────────────────────────
   - type: web

@@ -17,6 +17,10 @@ const {
 const orderService = require("../services/orderService");
 const prisma = require("../config/db");
 const path = require("path");
+const {
+  emitPendingQueueChanged,
+  summarizeOrderItems,
+} = require("../utils/orderEvents");
 
 // Helper: emit balance-updated WebSocket event to a specific user after refund
 const emitBalanceUpdate = async (userId) => {
@@ -49,17 +53,13 @@ exports.submitCart = async (req, res) => {
 
     const order = await submitCart(userId, mobileNumber);
 
-    // Emit real-time notification to admin
-    try {
-      const { io } = require("../index");
-      io.emit("new-order", {
-        orderId: order.id,
-        userId,
-        itemCount: order.items?.length || 0,
-      });
-    } catch (e) {
-      /* socket emit is best-effort */
-    }
+    emitPendingQueueChanged({
+      orderId: order.id,
+      userId,
+      itemCount: order.items?.length || 0,
+      networks: summarizeOrderItems(order.items),
+      source: "cart",
+    });
 
     res.status(201).json({
       success: true,
@@ -723,17 +723,13 @@ exports.createDirectOrder = async (req, res) => {
       totalAmount,
     );
 
-    // Emit real-time notification to admin
-    try {
-      const { io } = require("../index");
-      io.emit("new-order", {
-        orderId: order.id,
-        userId,
-        itemCount: items?.length || 0,
-      });
-    } catch (e) {
-      /* socket emit is best-effort */
-    }
+    emitPendingQueueChanged({
+      orderId: order.id,
+      userId,
+      itemCount: items?.length || 0,
+      networks: summarizeOrderItems(order.items),
+      source: "direct",
+    });
 
     res.status(201).json({
       success: true,
@@ -970,11 +966,22 @@ exports.cancelOrderItem = async (req, res) => {
 
 const orderBatchService = require("../services/orderBatchService");
 const gmplAutoExportService = require("../services/gmplAutoExportService");
+const gmplStatusSyncService = require("../services/gmplStatusSyncService");
+const { isGmplNetwork } = require("../utils/gmplNetwork");
 
 exports.getPendingCounts = async (req, res) => {
   try {
     const counts = await orderBatchService.getPendingCountsByNetwork();
     res.json({ success: true, counts });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getPendingQueue = async (req, res) => {
+  try {
+    const queue = await orderBatchService.getPendingQueue();
+    res.json({ success: true, queue });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -992,13 +999,33 @@ exports.exportPendingOrders = async (req, res) => {
     const result = await gmplAutoExportService.exportPendingWithGmpl(
       adminUserId,
       network,
-      { submitToGmpl: submitToGmpl !== false },
+      {
+        submitToGmpl: submitToGmpl !== false && isGmplNetwork(network),
+      },
     );
-    const { batch, buffer, gmplStatus, gmplError, gmplResult, gmplResponseId } =
-      result;
+    const {
+      batch,
+      buffer,
+      gmplStatus,
+      gmplError,
+      gmplResult,
+      gmplResponseId,
+      batchCount,
+      batches,
+      submittedCount,
+      failedCount,
+    } = result;
+
+    const batchIds = (batches || []).map((b) => b.batch?.id).filter(Boolean);
+    res.setHeader("X-Batch-Count", String(batchCount || 1));
+    res.setHeader(
+      "X-Batch-Ids",
+      batchIds.length ? batchIds.join(",") : String(batch?.id || ""),
+    );
 
     if (gmplStatus === "submitted") {
       res.setHeader("X-GMPL-Submitted", "true");
+      res.setHeader("X-GMPL-Submitted-Count", String(submittedCount || batchCount || 1));
       const gmplBatchId =
         gmplResponseId ||
         (gmplResult && typeof gmplResult === "object"
@@ -1006,6 +1033,13 @@ exports.exportPendingOrders = async (req, res) => {
           : null);
       if (gmplBatchId) {
         res.setHeader("X-GMPL-Batch-Id", String(gmplBatchId));
+      }
+    } else if (gmplStatus === "partial") {
+      res.setHeader("X-GMPL-Submitted", "partial");
+      res.setHeader("X-GMPL-Submitted-Count", String(submittedCount || 0));
+      res.setHeader("X-GMPL-Failed-Count", String(failedCount || 0));
+      if (gmplError) {
+        res.setHeader("X-GMPL-Error", encodeURIComponent(gmplError));
       }
     } else if (gmplStatus === "failed") {
       console.error("[exportPendingOrders] GMPL submit failed:", gmplError);
@@ -1018,7 +1052,7 @@ exports.exportPendingOrders = async (req, res) => {
       res.setHeader("X-GMPL-Submitted", "skipped");
     }
 
-    res.setHeader("X-Batch-Id", String(batch.id));
+    res.setHeader("X-Batch-Id", String(batch?.id || batchIds[0] || ""));
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1058,6 +1092,44 @@ exports.getGmplAutoExportStatus = async (req, res) => {
   }
 };
 
+exports.handleGmplWebhook = async (req, res) => {
+  try {
+    if (!gmplStatusSyncService.verifyWebhookSecret(req)) {
+      return res.status(401).json({ success: false, message: "Invalid webhook secret" });
+    }
+
+    const result = await gmplStatusSyncService.applyFulfillmentUpdate(req.body);
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error("[handleGmplWebhook]", error.message);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+exports.syncGmplBatchStatus = async (req, res) => {
+  try {
+    const batch = await orderBatchService.getBatchById(req.params.batchId);
+    if (!isGmplNetwork(batch.network)) {
+      return res.status(400).json({
+        success: false,
+        message: "GMPL status sync applies to MTN batches only.",
+      });
+    }
+
+    const result = await gmplStatusSyncService.syncBatchFromGmpl({
+      id: batch.id,
+      gmplResponseId: batch.gmplResponseId,
+      gmplStatus: batch.gmplStatus,
+      network: batch.network,
+      status: batch.status,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
 exports.submitAdminGmplFile = async (req, res) => {
   const filePath = req.file?.path;
   try {
@@ -1075,7 +1147,14 @@ exports.submitAdminGmplFile = async (req, res) => {
     if (!network) {
       return res.status(400).json({
         success: false,
-        message: "network is required (e.g. MTN, TELECEL, AIRTEL TIGO).",
+        message: "network is required (MTN only for GMPL).",
+      });
+    }
+
+    if (!isGmplNetwork(network)) {
+      return res.status(400).json({
+        success: false,
+        message: "GMPL manual upload supports MTN orders only.",
       });
     }
 

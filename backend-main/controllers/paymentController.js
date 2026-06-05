@@ -2,6 +2,10 @@ const paymentService = require("../services/paymentService");
 const shopService = require("../services/shopService");
 const prisma = require("../config/db");
 const { verifyPaystackSignature } = require("../utils/paystackWebhook");
+const {
+  emitPendingQueueChanged,
+  summarizeOrderItems,
+} = require("../utils/orderEvents");
 
 // Atomic order creation - prevents duplicate orders from webhook + verify race condition
 const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
@@ -87,6 +91,18 @@ const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
     },
     { timeout: 15000 },
   );
+};
+
+const notifyPendingOrderCreated = (orderResult) => {
+  if (!orderResult?.created || !orderResult?.order) return;
+  const { order } = orderResult;
+  emitPendingQueueChanged({
+    orderId: order.id,
+    userId: order.userId,
+    itemCount: order.items?.length || 0,
+    networks: summarizeOrderItems(order.items),
+    source: "paystack",
+  });
 };
 
 // Initialize Paystack payment
@@ -211,6 +227,7 @@ const handleWebhook = async (req, res) => {
         );
         if (orderResult.created) {
           console.log("[Webhook] Order created:", orderResult.orderId);
+          notifyPendingOrderCreated(orderResult);
         } else if (orderResult.alreadyExists) {
           console.log("[Webhook] Order already exists:", orderResult.orderId);
         }
@@ -303,6 +320,9 @@ const verifyPaymentStatus = async (req, res) => {
                 orderResult.created ? "created" : "already exists",
                 orderResult.orderId,
               );
+              if (orderResult.created) {
+                notifyPendingOrderCreated(orderResult);
+              }
               break;
             }
           } catch (err) {

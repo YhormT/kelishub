@@ -1,5 +1,6 @@
 const fs = require('fs');
 const externalApiService = require('../services/externalApiService');
+const { emitPendingQueueChanged } = require('../utils/orderEvents');
 
 const emitBalanceUpdate = async (req, agentId) => {
   try {
@@ -72,19 +73,14 @@ exports.createOrder = async (req, res) => {
     const order = await externalApiService.createExternalOrder(req.partner.id, items);
     await emitBalanceUpdate(req, req.partner.agentId);
 
-    try {
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('new-order', {
-          orderId: order.orderId,
-          partner: req.partner.name,
-          agentId: req.partner.agentId,
-          itemCount: items.length,
-        });
-      }
-    } catch (e) {
-      /* best-effort */
-    }
+    emitPendingQueueChanged({
+      orderId: order.orderId,
+      partner: req.partner.name,
+      agentId: req.partner.agentId,
+      itemCount: items.length,
+      networks: order.networks || {},
+      source: 'external-api',
+    });
 
     res.status(201).json({
       success: true,
@@ -116,20 +112,14 @@ exports.createFileOrder = async (req, res) => {
 
     await emitBalanceUpdate(req, req.partner.agentId);
 
-    try {
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('new-order', {
-          orderId: order.orderId,
-          partner: req.partner.name,
-          agentId: req.partner.agentId,
-          itemCount: order.itemCount,
-          source: 'gmpl-file',
-        });
-      }
-    } catch (e) {
-      /* best-effort */
-    }
+    emitPendingQueueChanged({
+      orderId: order.orderId,
+      partner: req.partner.name,
+      agentId: req.partner.agentId,
+      itemCount: order.itemCount,
+      networks: order.networks || {},
+      source: 'gmpl-file',
+    });
 
     res.status(201).json({
       success: true,

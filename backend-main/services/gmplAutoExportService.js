@@ -4,8 +4,10 @@ const {
   buildSupplierExcelBuffer,
   submitRowsToGmpl,
 } = require('../utils/gmplOrderExport');
+const { GMPL_NETWORK, isGmplNetwork } = require('../utils/gmplNetwork');
+const { emitPendingQueueChanged } = require('../utils/orderEvents');
 
-const NETWORKS = ['MTN', 'TELECEL', 'AIRTEL TIGO'];
+const GMPL_AUTO_NETWORKS = [GMPL_NETWORK];
 
 let cycleRunning = false;
 
@@ -23,6 +25,11 @@ const getConfig = () => ({
   maxRetries: Math.max(
     1,
     parseInt(process.env.GMPL_AUTO_MAX_RETRIES || '3', 10)
+  ),
+  /** Max purchaser orders per auto-export cycle (FIFO). 0 = no cap (export all pending). */
+  maxOrdersPerCycle: Math.max(
+    0,
+    parseInt(process.env.GMPL_MAX_ORDERS_PER_CYCLE || '3', 10)
   ),
 });
 
@@ -100,6 +107,10 @@ const submitExistingBatchToGmpl = async (batchId, { incrementRetry = false } = {
     throw new Error('Batch has no network label; cannot submit to GMPL.');
   }
 
+  if (!isGmplNetwork(existing.network)) {
+    throw new Error('GMPL submission is only supported for MTN batches.');
+  }
+
   if (!process.env.GMPL_API_KEY) {
     throw new Error('GMPL API is not configured. Set GMPL_API_KEY on the server.');
   }
@@ -134,71 +145,118 @@ const submitExistingBatchToGmpl = async (batchId, { incrementRetry = false } = {
   }
 };
 
-const exportPendingWithGmpl = async (adminUserId, network, { submitToGmpl = true, autoExport = false } = {}) => {
-  const { batch, rows } = await orderBatchService.exportPendingByNetwork(
+const exportPendingWithGmpl = async (
+  adminUserId,
+  network,
+  { submitToGmpl = true, autoExport = false, maxOrders } = {}
+) => {
+  const exportResult = await orderBatchService.exportPendingByNetwork(
     adminUserId,
-    network
+    network,
+    { maxOrders }
   );
+  const {
+    batches: orderBatches,
+    rows,
+    orderCount,
+    remainingPendingOrders,
+    pendingOrderCount,
+  } = exportResult;
 
   const buffer = buildSupplierExcelBuffer(rows);
-  const shouldSubmit = submitToGmpl && Boolean(process.env.GMPL_API_KEY);
+  const shouldSubmit =
+    submitToGmpl && isGmplNetwork(network) && Boolean(process.env.GMPL_API_KEY);
 
-  if (autoExport) {
-    await prisma.orderBatch.update({
-      where: { id: batch.id },
-      data: { gmplAutoExport: true },
+  const batchResults = [];
+
+  for (const { batch, rows: batchRows } of orderBatches) {
+    emitPendingQueueChanged({
+      type: 'exported',
+      batchId: batch.id,
+      network,
+      itemCount: batch.totalItems,
+      orderId: batchRows[0]?.orderId,
     });
-  }
 
-  if (!process.env.GMPL_API_KEY) {
-    await recordGmplSubmission(batch.id, {
-      status: 'skipped',
-      error: 'GMPL_API_KEY not configured',
-    });
+    if (autoExport) {
+      await prisma.orderBatch.update({
+        where: { id: batch.id },
+        data: { gmplAutoExport: true },
+      });
+    }
 
-    return {
+    let gmplStatus = 'skipped';
+    let gmplError = null;
+    let gmplResult = null;
+    let gmplResponseId = null;
+
+    if (!isGmplNetwork(network)) {
+      await recordGmplSubmission(batch.id, {
+        status: 'skipped',
+        error: 'GMPL is MTN-only; batch exported without supplier submit',
+      });
+      gmplError = 'Non-MTN network — GMPL not used';
+    } else if (!process.env.GMPL_API_KEY) {
+      await recordGmplSubmission(batch.id, {
+        status: 'skipped',
+        error: 'GMPL_API_KEY not configured',
+      });
+      gmplError = 'GMPL_API_KEY not configured';
+    } else if (!shouldSubmit) {
+      await recordGmplSubmission(batch.id, { status: 'skipped' });
+    } else {
+      try {
+        gmplResult = await submitRowsToGmpl(batchRows, network);
+        gmplResponseId = extractGmplResponseId(gmplResult);
+        await recordGmplSubmission(batch.id, {
+          status: 'submitted',
+          responseId: gmplResponseId,
+          autoExport,
+        });
+        gmplStatus = 'submitted';
+      } catch (err) {
+        gmplError = err.message || 'GMPL submit failed';
+        await recordGmplSubmission(batch.id, {
+          status: 'failed',
+          error: gmplError,
+          autoExport,
+        });
+        gmplStatus = 'failed';
+      }
+    }
+
+    batchResults.push({
       batch,
-      buffer,
-      gmplStatus: 'skipped',
-      gmplError: 'GMPL_API_KEY not configured',
-    };
-  }
-
-  if (!shouldSubmit) {
-    await recordGmplSubmission(batch.id, { status: 'skipped' });
-    return { batch, buffer, gmplStatus: 'skipped' };
-  }
-
-  try {
-    const gmplResult = await submitRowsToGmpl(rows, network);
-    const responseId = extractGmplResponseId(gmplResult);
-    await recordGmplSubmission(batch.id, {
-      status: 'submitted',
-      responseId,
-      autoExport,
-    });
-
-    return {
-      batch,
-      buffer,
-      gmplStatus: 'submitted',
+      gmplStatus,
+      gmplError,
       gmplResult,
-      gmplResponseId: responseId,
-    };
-  } catch (err) {
-    await recordGmplSubmission(batch.id, {
-      status: 'failed',
-      error: err.message || 'GMPL submit failed',
-      autoExport,
+      gmplResponseId,
     });
-
-    return {
-      batch,
-      buffer,
-      gmplStatus: 'failed',
-      gmplError: err.message || 'GMPL submit failed',
-    };
   }
+
+  const submittedCount = batchResults.filter((b) => b.gmplStatus === 'submitted').length;
+  const failedCount = batchResults.filter((b) => b.gmplStatus === 'failed').length;
+  let overallGmplStatus = 'skipped';
+  if (submittedCount === batchResults.length && submittedCount > 0) overallGmplStatus = 'submitted';
+  else if (failedCount > 0 && submittedCount > 0) overallGmplStatus = 'partial';
+  else if (failedCount > 0) overallGmplStatus = 'failed';
+
+  const first = batchResults[0];
+
+  return {
+    batch: first?.batch,
+    batches: batchResults,
+    batchCount: orderCount || batchResults.length,
+    remainingPendingOrders,
+    pendingOrderCount,
+    buffer,
+    gmplStatus: overallGmplStatus,
+    gmplError: failedCount > 0 ? batchResults.find((b) => b.gmplError)?.gmplError : null,
+    gmplResult: first?.gmplResult,
+    gmplResponseId: first?.gmplResponseId,
+    submittedCount,
+    failedCount,
+  };
 };
 
 const retryFailedBatches = async () => {
@@ -209,6 +267,7 @@ const retryFailedBatches = async () => {
     where: {
       gmplStatus: 'failed',
       gmplRetryCount: { lt: maxRetries },
+      network: GMPL_NETWORK,
     },
     orderBy: { createdAt: 'asc' },
     take: 5,
@@ -236,30 +295,43 @@ const retryFailedBatches = async () => {
 };
 
 const autoExportPendingNetworks = async (adminUserId) => {
-  const { minPending } = getConfig();
-  const counts = await orderBatchService.getPendingCountsByNetwork();
+  const { minPending, maxOrdersPerCycle } = getConfig();
+  const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
   const results = [];
 
-  for (const network of NETWORKS) {
-    const pending = counts[network]?.count || 0;
-    if (pending < minPending) continue;
+  for (const network of GMPL_AUTO_NETWORKS) {
+    const pendingOrders = orderCounts[network]?.count || 0;
+    // Single pending order must go through (minPending defaults to 1 order, not 3)
+    if (pendingOrders < minPending) continue;
+
+    const maxOrders =
+      maxOrdersPerCycle > 0
+        ? Math.min(maxOrdersPerCycle, pendingOrders)
+        : undefined;
 
     try {
       const result = await exportPendingWithGmpl(adminUserId, network, {
         submitToGmpl: true,
         autoExport: true,
+        maxOrders,
       });
 
       results.push({
         network,
-        batchId: result.batch.id,
-        itemCount: result.batch.totalItems,
+        batchId: result.batch?.id,
+        batchCount: result.batchCount,
+        remainingPendingOrders: result.remainingPendingOrders,
+        itemCount: result.batch?.totalItems,
         gmplStatus: result.gmplStatus,
         gmplError: result.gmplError || null,
       });
 
       console.log(
-        `[GMPL Auto] Exported ${result.batch.totalItems} ${network} orders → batch #${result.batch.id} (GMPL: ${result.gmplStatus})`
+        `[GMPL Auto] Exported ${result.batchCount} order batch(es) for ${network}` +
+          (result.remainingPendingOrders
+            ? ` (${result.remainingPendingOrders} pending order(s) left for next cycle)`
+            : '') +
+          ` — GMPL: ${result.gmplStatus}`
       );
     } catch (err) {
       if (err.message?.includes('No pending orders')) continue;
@@ -308,7 +380,11 @@ const startAutoGmplScheduler = () => {
   }
 
   console.log(
-    `[GMPL Auto] Scheduler started (every ${config.intervalMs / 1000}s, min pending: ${config.minPending})`
+    `[GMPL Auto] Scheduler started (every ${config.intervalMs / 1000}s, min pending: ${config.minPending}` +
+      (config.maxOrdersPerCycle > 0
+        ? `, max ${config.maxOrdersPerCycle} order(s)/cycle (no wait for GMPL completion)`
+        : ', unlimited orders/cycle') +
+      ')'
   );
 
   setInterval(() => {
@@ -324,15 +400,76 @@ const startAutoGmplScheduler = () => {
   }, 45_000);
 };
 
+/**
+ * Export pending MTN orders right away when a new order arrives (does not wait for scheduler).
+ * Respects maxOrdersPerCycle cap; a single pending order is exported immediately.
+ */
+const tryImmediateAutoExport = async (payload = {}) => {
+  const config = getConfig();
+  if (!config.enabled || !process.env.GMPL_API_KEY) return { skipped: true };
+  if (payload.type === 'exported') return { skipped: true };
+  if (!payload.networks?.MTN) return { skipped: true };
+  if (cycleRunning) return { skipped: true, reason: 'cycle_running' };
+
+  cycleRunning = true;
+  try {
+    const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
+    const pendingOrders = orderCounts.MTN?.count || 0;
+    if (pendingOrders < config.minPending) {
+      return { skipped: true, reason: 'below_min_pending_orders' };
+    }
+
+    const maxOrders =
+      config.maxOrdersPerCycle > 0
+        ? Math.min(config.maxOrdersPerCycle, pendingOrders)
+        : pendingOrders;
+
+    const adminUserId = await getSystemAdminUserId();
+    const result = await exportPendingWithGmpl(adminUserId, GMPL_NETWORK, {
+      submitToGmpl: true,
+      autoExport: true,
+      maxOrders,
+    });
+
+    console.log(
+      `[GMPL Auto] Immediate export: ${result.batchCount} batch(es)` +
+        (result.remainingPendingOrders
+          ? ` (${result.remainingPendingOrders} order(s) still pending)`
+          : '')
+    );
+
+    return { exported: true, ...result };
+  } catch (err) {
+    if (!err.message?.includes('No pending')) {
+      console.error('[GMPL Auto] Immediate export error:', err.message);
+    }
+    return { skipped: true, error: err.message };
+  } finally {
+    cycleRunning = false;
+  }
+};
+
+const scheduleImmediateAutoExport = (payload = {}) => {
+  if (!payload.orderId || payload.type === 'exported') return;
+  if (!payload.networks?.MTN) return;
+  setImmediate(() => {
+    tryImmediateAutoExport(payload).catch(() => {});
+  });
+};
+
 const getAutoExportStatus = () => {
   const config = getConfig();
   return {
     enabled: config.enabled,
     configured: Boolean(process.env.GMPL_API_KEY),
+    network: GMPL_NETWORK,
     intervalMs: config.intervalMs,
     minPendingCount: config.minPending,
+    minPendingOrders: config.minPending,
+    maxOrdersPerCycle: config.maxOrdersPerCycle,
     retryFailed: config.retryFailed,
     maxRetries: config.maxRetries,
+    statusSyncEnabled: process.env.GMPL_STATUS_SYNC !== 'false',
   };
 };
 
@@ -344,4 +481,6 @@ module.exports = {
   exportPendingWithGmpl,
   runAutoGmplCycle,
   startAutoGmplScheduler,
+  tryImmediateAutoExport,
+  scheduleImmediateAutoExport,
 };

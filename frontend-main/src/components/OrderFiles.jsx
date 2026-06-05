@@ -54,9 +54,22 @@ const GmplStatusBadge = ({ status, autoExport }) => {
   );
 };
 
+const isMtnNetwork = (network) => network === 'MTN';
+
+const formatStatusCounts = (counts) => {
+  if (!counts) return null;
+  const parts = [];
+  if (counts.Pending) parts.push(`${counts.Pending} Pending`);
+  if (counts.Processing) parts.push(`${counts.Processing} Processing`);
+  if (counts.Completed) parts.push(`${counts.Completed} Completed`);
+  if (counts.Cancelled) parts.push(`${counts.Cancelled} Cancelled`);
+  return parts.length ? parts.join(' · ') : null;
+};
+
 const OrderFiles = () => {
   const [batches, setBatches] = useState([]);
   const [pendingCounts, setPendingCounts] = useState({});
+  const [pendingQueue, setPendingQueue] = useState({});
   const [loading, setLoading] = useState(true);
   const [initialLoad, setInitialLoad] = useState(true);
   const [exporting, setExporting] = useState(null);
@@ -67,19 +80,33 @@ const OrderFiles = () => {
   const [statusUpdateLoading, setStatusUpdateLoading] = useState(false);
   const [gmplUploading, setGmplUploading] = useState(false);
   const [gmplFile, setGmplFile] = useState(null);
-  const [gmplNetwork, setGmplNetwork] = useState('');
   const [submittingGmplBatchId, setSubmittingGmplBatchId] = useState(null);
+  const [syncingGmplBatchId, setSyncingGmplBatchId] = useState(null);
   const [autoExportConfig, setAutoExportConfig] = useState(null);
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, limit: 15, total: 0, totalPages: 1 });
   const perPage = 15;
 
+  const fetchPendingLive = useCallback(async () => {
+    try {
+      const [countRes, queueRes] = await Promise.all([
+        axios.get(`${BASE_URL}/order/admin/batches/pending-counts`, { headers: getAuthHeaders() }),
+        axios.get(`${BASE_URL}/order/admin/batches/pending-queue`, { headers: getAuthHeaders() }),
+      ]);
+      if (countRes.data.success) setPendingCounts(countRes.data.counts);
+      if (queueRes.data.success) setPendingQueue(queueRes.data.queue);
+    } catch (err) {
+      console.error('Error fetching pending queue:', err);
+    }
+  }, []);
+
   const fetchBatches = useCallback(async (targetPage = page, isRefresh = false) => {
     try {
       if (!isRefresh) setLoading(true);
-      const [batchRes, countRes] = await Promise.all([
+      const [batchRes, countRes, queueRes] = await Promise.all([
         axios.get(`${BASE_URL}/order/admin/batches`, { headers: getAuthHeaders(), params: { page: targetPage, limit: perPage } }),
         axios.get(`${BASE_URL}/order/admin/batches/pending-counts`, { headers: getAuthHeaders() }),
+        axios.get(`${BASE_URL}/order/admin/batches/pending-queue`, { headers: getAuthHeaders() }),
       ]);
       if (batchRes.data.success) {
         setBatches(batchRes.data.batches);
@@ -89,6 +116,7 @@ const OrderFiles = () => {
         }
       }
       if (countRes.data.success) setPendingCounts(countRes.data.counts);
+      if (queueRes.data.success) setPendingQueue(queueRes.data.queue);
     } catch (err) {
       console.error('Error fetching data:', err);
     } finally {
@@ -112,24 +140,43 @@ const OrderFiles = () => {
     fetchAutoExportConfig();
   }, []);
 
-  // WebSocket: auto-refresh when new orders are submitted
+  // WebSocket: refresh pending counts/queue immediately when orders arrive or are exported
   useEffect(() => {
     const socket = getSocket();
-    const handleNewOrder = () => {
-      // Refresh both pending counts AND batches list instantly when a new order arrives
+    const handlePendingChanged = (data) => {
+      if (data?.networks && data.type !== 'exported') {
+        setPendingCounts((prev) => {
+          const next = { ...prev };
+          for (const [network, added] of Object.entries(data.networks)) {
+            if (!added) continue;
+            if (!next[network]) next[network] = { count: 0, total: 0 };
+            next[network] = {
+              ...next[network],
+              count: (next[network].count || 0) + added,
+            };
+          }
+          return next;
+        });
+      }
+      fetchPendingLive();
       fetchBatches(page, true);
     };
-    socket.on('new-order', handleNewOrder);
-    return () => { socket.off('new-order', handleNewOrder); };
-  }, [fetchBatches, page]);
+    socket.on('order-pending-changed', handlePendingChanged);
+    socket.on('new-order', handlePendingChanged);
+    return () => {
+      socket.off('order-pending-changed', handlePendingChanged);
+      socket.off('new-order', handlePendingChanged);
+    };
+  }, [fetchPendingLive, fetchBatches, page]);
 
   // Background periodic refresh every 30 seconds (safety net for missed socket events)
   useEffect(() => {
     const interval = setInterval(() => {
+      fetchPendingLive();
       fetchBatches(page, true);
     }, 30000);
     return () => clearInterval(interval);
-  }, [fetchBatches, page]);
+  }, [fetchPendingLive, fetchBatches, page]);
 
   const fetchBatchDetail = async (batchId) => {
     try {
@@ -150,12 +197,16 @@ const OrderFiles = () => {
       return;
     }
 
+    const submitToGmpl = isMtnNetwork(network);
+
     const confirm = await Swal.fire({
       title: `Export ${network} Orders`,
-      html: `<p style="color:#94a3b8">Export <b style="color:#fff">${count}</b> pending ${network} orders.</p><p style="color:#94a3b8;margin-top:8px">Creates a batch, sets orders to Processing, downloads Excel, and submits the file to <b style="color:#fff">GMPL</b> when configured.</p>`,
+      html: submitToGmpl
+        ? `<p style="color:#94a3b8">Export <b style="color:#fff">${count}</b> pending ${network} orders.</p><p style="color:#94a3b8;margin-top:8px">Creates a batch, sets orders to Processing, downloads Excel, and submits to <b style="color:#fff">GMPL</b> when configured.</p>`
+        : `<p style="color:#94a3b8">Export <b style="color:#fff">${count}</b> pending ${network} orders.</p><p style="color:#94a3b8;margin-top:8px">Creates a batch, sets orders to Processing, and downloads Excel. <b style="color:#fff">GMPL is MTN-only</b> — this network is export-only.</p>`,
       icon: 'question',
       showCancelButton: true,
-      confirmButtonText: 'Export & Send to GMPL',
+      confirmButtonText: submitToGmpl ? 'Export & Send to GMPL' : 'Export only',
       confirmButtonColor: '#06b6d4',
       background: '#1a1a2e',
       color: '#fff',
@@ -166,7 +217,7 @@ const OrderFiles = () => {
       setExporting(network);
       const res = await axios.post(
         `${BASE_URL}/order/admin/batches/export`,
-        { network, submitToGmpl: true },
+        { network, submitToGmpl },
         { headers: getAuthHeaders(), responseType: 'blob' }
       );
 
@@ -189,12 +240,27 @@ const OrderFiles = () => {
       const gmplSubmitted = res.headers['x-gmpl-submitted'];
       const gmplError = res.headers['x-gmpl-error'];
       const batchId = res.headers['x-batch-id'];
+      const batchCount = parseInt(res.headers['x-batch-count'] || '1', 10);
+      const batchIds = res.headers['x-batch-ids'] || batchId;
+      const batchLabel = batchCount > 1 ? `${batchCount} batches (${batchIds})` : `#${batchId || '—'}`;
 
       if (gmplSubmitted === 'true') {
         Swal.fire({
-          title: 'Exported & sent to GMPL',
-          text: `Batch #${batchId || '—'}: ${count} ${network} orders processing.`,
+          title: batchCount > 1 ? 'Exported & sent to GMPL' : 'Exported & sent to GMPL',
+          text: `${batchLabel}: ${count} ${network} item(s) processing — one batch per order.`,
           icon: 'success',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+        });
+      } else if (gmplSubmitted === 'partial') {
+        const submittedN = res.headers['x-gmpl-submitted-count'] || '?';
+        const failedN = res.headers['x-gmpl-failed-count'] || '?';
+        const errMsg = gmplError ? decodeURIComponent(gmplError) : '';
+        Swal.fire({
+          title: 'Exported — GMPL partially failed',
+          html: `<p>${batchLabel} created.</p><p class="text-sm mt-2">${submittedN} sent, ${failedN} failed.</p>${errMsg ? `<p class="text-sm mt-2 text-red-300">${errMsg}</p>` : ''}`,
+          icon: 'warning',
           background: '#1a1a2e',
           color: '#fff',
           confirmButtonColor: '#06b6d4',
@@ -203,7 +269,7 @@ const OrderFiles = () => {
         const errMsg = decodeURIComponent(gmplError);
         Swal.fire({
           title: 'Exported — GMPL failed',
-          html: `<p>Batch #${batchId || '—'} created and Excel downloaded.</p><p class="text-sm mt-2 text-red-300">${errMsg}</p><p class="text-sm mt-2">Use <b>Send to GMPL</b> on the batch to retry.</p>`,
+          html: `<p>${batchLabel} created and Excel downloaded.</p><p class="text-sm mt-2 text-red-300">${errMsg}</p><p class="text-sm mt-2">Use <b>Send to GMPL</b> on failed batches to retry.</p>`,
           icon: 'warning',
           background: '#1a1a2e',
           color: '#fff',
@@ -212,12 +278,14 @@ const OrderFiles = () => {
       } else {
         Swal.fire({
           title: 'Exported',
-          text: `${count} ${network} orders exported (GMPL skipped — key not set).`,
+          text: submitToGmpl
+            ? `${batchLabel}: ${count} ${network} item(s) (GMPL skipped — key not set). One batch per order.`
+            : `${batchLabel}: ${count} ${network} item(s) exported (Excel only). One batch per order.`,
           icon: 'success',
           background: '#1a1a2e',
           color: '#fff',
           confirmButtonColor: '#06b6d4',
-          timer: 2500,
+          timer: 3000,
         });
       }
       fetchBatches(1, true);
@@ -262,14 +330,58 @@ const OrderFiles = () => {
     }
   };
 
+  const handleSyncGmplBatchStatus = async (batchId) => {
+    try {
+      setSyncingGmplBatchId(batchId);
+      const res = await axios.post(
+        `${BASE_URL}/order/admin/batches/${batchId}/sync-gmpl-status`,
+        {},
+        { headers: getAuthHeaders() }
+      );
+      if (res.data.success) {
+        const updated = res.data.updatedItems ?? 0;
+        const status = res.data.batchStatus || res.data.status;
+        Swal.fire({
+          title: 'Synced from GMPL',
+          text: updated > 0
+            ? `Updated ${updated} item(s)${status ? ` — batch now ${status}` : ''}.`
+            : res.data.reason === 'no_remote_data'
+              ? 'No status update available from GMPL yet.'
+              : 'Batch is already up to date.',
+          icon: updated > 0 ? 'success' : 'info',
+          background: '#1a1a2e',
+          color: '#fff',
+          confirmButtonColor: '#06b6d4',
+        });
+        fetchBatches(page, true);
+        if (selectedBatch === batchId) fetchBatchDetail(batchId);
+      }
+    } catch (err) {
+      Swal.fire({
+        title: 'Sync failed',
+        text: err.response?.data?.message || 'Could not sync batch status from GMPL.',
+        icon: 'error',
+        background: '#1a1a2e',
+        color: '#fff',
+      });
+    } finally {
+      setSyncingGmplBatchId(null);
+    }
+  };
+
   const handleAdminGmplUpload = async () => {
-    if (!gmplFile || !gmplNetwork) {
-      Swal.fire({ title: 'Missing fields', text: 'Select a network and Excel file.', icon: 'warning', background: '#1a1a2e', color: '#fff' });
+    if (!gmplFile) {
+      Swal.fire({ title: 'Missing file', text: 'Select an Excel file to upload.', icon: 'warning', background: '#1a1a2e', color: '#fff' });
+      return;
+    }
+    const network = 'MTN';
+    if (!isMtnNetwork(network)) {
+      Swal.fire({ title: 'MTN only', text: 'GMPL manual upload supports MTN orders only.', icon: 'warning', background: '#1a1a2e', color: '#fff' });
       return;
     }
     const formData = new FormData();
     formData.append('orderFile', gmplFile);
-    formData.append('network', gmplNetwork);
+    formData.append('network', network);
 
     try {
       setGmplUploading(true);
@@ -286,7 +398,6 @@ const OrderFiles = () => {
           confirmButtonColor: '#06b6d4',
         });
         setGmplFile(null);
-        setGmplNetwork('');
       }
     } catch (err) {
       Swal.fire({
@@ -424,10 +535,13 @@ const OrderFiles = () => {
               {batchDetail.gmplStatus === 'failed' && batchDetail.gmplError && (
                 <p className="text-red-400 text-xs mt-1 max-w-xl">{batchDetail.gmplError}</p>
               )}
+              {formatStatusCounts(batchDetail.statusCounts) && (
+                <p className="text-dark-400 text-xs mt-1">{formatStatusCounts(batchDetail.statusCounts)}</p>
+              )}
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {batchDetail.gmplStatus !== 'submitted' && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {isMtnNetwork(batchDetail.network) && batchDetail.gmplStatus !== 'submitted' && (
               <button
                 onClick={() => handleSubmitBatchToGmpl(batchDetail.id)}
                 disabled={submittingGmplBatchId === batchDetail.id}
@@ -435,6 +549,16 @@ const OrderFiles = () => {
               >
                 {submittingGmplBatchId === batchDetail.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                 {batchDetail.gmplStatus === 'failed' ? 'Retry GMPL' : 'Send to GMPL'}
+              </button>
+            )}
+            {isMtnNetwork(batchDetail.network) && batchDetail.gmplStatus === 'submitted' && (
+              <button
+                onClick={() => handleSyncGmplBatchStatus(batchDetail.id)}
+                disabled={syncingGmplBatchId === batchDetail.id}
+                className="flex items-center gap-2 px-4 py-2 bg-cyan-500/10 border border-cyan-500/30 rounded-xl text-cyan-400 hover:bg-cyan-500/20 text-sm disabled:opacity-50"
+              >
+                {syncingGmplBatchId === batchDetail.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                Sync from GMPL
               </button>
             )}
             <button onClick={() => handleRedownload(batchDetail.id, batchDetail.filename)} className="flex items-center gap-2 px-4 py-2 bg-dark-800 border border-dark-600 rounded-xl text-dark-300 hover:text-white hover:bg-dark-700 text-sm">
@@ -527,16 +651,91 @@ const OrderFiles = () => {
         <div className="bg-gradient-to-r from-cyan-500/10 to-emerald-500/10 border border-cyan-500/20 rounded-2xl p-4 mb-6 flex items-start gap-3">
           <Zap className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
           <div>
-            <p className="text-white font-medium text-sm">GMPL auto-export is active</p>
+            <p className="text-white font-medium text-sm">GMPL auto-export is active (MTN only)</p>
             <p className="text-dark-400 text-xs mt-1">
-              Pending orders are exported and sent to GMPL every {Math.round(autoExportConfig.intervalMs / 60000)} min
-              (min {autoExportConfig.minPendingCount} per network).
-              Failed batches auto-retry up to {autoExportConfig.maxRetries} times.
-              Use manual actions below if a submission still fails.
+              Pending MTN orders are exported as <b className="text-white">one batch per purchaser order</b> every {Math.round(autoExportConfig.intervalMs / 60000)} min
+              {autoExportConfig.maxOrdersPerCycle > 0 ? (
+                <> — up to <b className="text-white">{autoExportConfig.maxOrdersPerCycle}</b> orders per cycle (oldest first). The next cycle sends more without waiting for GMPL to complete earlier batches.</>
+              ) : (
+                <> (all pending orders each cycle).</>
+              )}
+              {' '}A single pending order is exported immediately (no need to wait for 3).
+              {' '}Min {autoExportConfig.minPendingCount} pending order(s) to trigger scheduled cycles.
+              Telecel and Airtel Tigo are export-only — no GMPL submit.
+              {autoExportConfig.statusSyncEnabled !== false && ' Status sync from GMPL runs automatically on submitted MTN batches.'}
+              {' '}Failed batches auto-retry up to {autoExportConfig.maxRetries} times.
             </p>
           </div>
         </div>
       )}
+
+      {/* Live pending queue — updates instantly via WebSocket when agents place orders */}
+      {(() => {
+        const mtnQueue = pendingQueue.MTN || { count: 0, total: 0, items: [] };
+        const otherPending = Object.entries(pendingQueue)
+          .filter(([net]) => net !== 'MTN')
+          .reduce((sum, [, q]) => sum + (q?.count || 0), 0);
+
+        if (mtnQueue.count === 0 && otherPending === 0) return null;
+
+        return (
+          <div className="bg-dark-800 border border-yellow-500/20 rounded-2xl p-5 mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+              <div>
+                <h3 className="text-white font-semibold flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-yellow-400" />
+                  Pending purchaser orders
+                  <span className="text-dark-500 text-xs font-normal">Live</span>
+                </h3>
+                <p className="text-dark-400 text-sm mt-1">
+                  New wallet orders appear here immediately — export from the MTN card when ready for GMPL.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="px-3 py-1.5 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-sm font-medium">
+                  MTN: {mtnQueue.count} pending · GHS {(mtnQueue.total || 0).toFixed(2)}
+                </span>
+                {otherPending > 0 && (
+                  <span className="px-3 py-1.5 rounded-xl bg-dark-700 border border-dark-600 text-dark-300 text-sm">
+                    Other networks: {otherPending}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            {mtnQueue.items?.length > 0 ? (
+              <div className="overflow-x-auto max-h-64 overflow-y-auto rounded-xl border border-dark-700">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-dark-900/95">
+                    <tr className="border-b border-dark-700">
+                      <th className="px-3 py-2 text-left text-dark-400 font-medium">Time</th>
+                      <th className="px-3 py-2 text-left text-dark-400 font-medium">Agent</th>
+                      <th className="px-3 py-2 text-left text-dark-400 font-medium">Phone</th>
+                      <th className="px-3 py-2 text-left text-dark-400 font-medium">Product</th>
+                      <th className="px-3 py-2 text-right text-dark-400 font-medium">Price</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-dark-700">
+                    {mtnQueue.items.slice(0, 50).map((item) => (
+                      <tr key={item.itemId} className="hover:bg-dark-700/30">
+                        <td className="px-3 py-2 text-dark-400 whitespace-nowrap text-xs">
+                          {item.createdAt ? formatDate(item.createdAt) : '—'}
+                        </td>
+                        <td className="px-3 py-2 text-dark-300">{item.agentName}</td>
+                        <td className="px-3 py-2 text-white font-mono text-xs">{item.phone || '—'}</td>
+                        <td className="px-3 py-2 text-dark-300 max-w-[200px] truncate" title={item.product}>{item.product}</td>
+                        <td className="px-3 py-2 text-right text-white">GHS {(item.price || 0).toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-dark-500 text-sm">No MTN pending orders right now.</p>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Direct GMPL upload (admin) — manual fallback */}
       <div className="bg-dark-800 border border-emerald-500/20 rounded-2xl p-5 mb-6">
@@ -545,18 +744,11 @@ const OrderFiles = () => {
           Submit Excel to GMPL
           <span className="text-dark-500 text-xs font-normal ml-1">Manual fallback</span>
         </h3>
-        <p className="text-dark-400 text-sm mb-4">Upload a supplier-format file (Phone + Data Size) when auto-export or batch retry did not go through.</p>
+        <p className="text-dark-400 text-sm mb-4">Upload a supplier-format MTN file (Phone + Data Size) when auto-export or batch retry did not go through.</p>
         <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
-          <select
-            value={gmplNetwork}
-            onChange={(e) => setGmplNetwork(e.target.value)}
-            className="px-3 py-2.5 bg-dark-900 border border-dark-600 rounded-xl text-white text-sm min-w-[140px]"
-          >
-            <option value="">Network</option>
-            <option value="MTN">MTN</option>
-            <option value="TELECEL">Telecel</option>
-            <option value="AIRTEL TIGO">Airtel Tigo</option>
-          </select>
+          <div className="px-3 py-2.5 bg-dark-900 border border-yellow-500/30 rounded-xl text-yellow-400 text-sm min-w-[140px] flex items-center">
+            MTN <span className="text-dark-500 text-xs ml-2">GMPL only</span>
+          </div>
           <input
             type="file"
             accept=".xlsx,.xls,.csv"
@@ -580,6 +772,7 @@ const OrderFiles = () => {
         {Object.entries(networkColors).map(([network, colors]) => {
           const data = pendingCounts[network] || { count: 0, total: 0 };
           const isExporting = exporting === network;
+          const usesGmpl = isMtnNetwork(network);
           return (
             <div key={network} className={`bg-gradient-to-br ${colors.bg} border ${colors.border} rounded-2xl p-5`}>
               <div className="flex items-center justify-between mb-3">
@@ -597,7 +790,7 @@ const OrderFiles = () => {
                 className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r ${colors.btn} text-white rounded-xl font-medium text-sm hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity`}
               >
                 {isExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                {isExporting ? 'Exporting...' : 'Export & GMPL'}
+                {isExporting ? 'Exporting...' : usesGmpl ? 'Export & GMPL' : 'Export only'}
               </button>
             </div>
           );
@@ -645,9 +838,9 @@ const OrderFiles = () => {
               </thead>
               <tbody className="divide-y divide-dark-700">
                 {filteredBatches.map((batch) => {
-                  const StatusIcon = statusIcons[batch.status] || Clock;
-                  const statusClass = statusColors[batch.status] || statusColors.Pending;
+                  const statusBreakdown = formatStatusCounts(batch.statusCounts);
                   const agentNames = batch.agents?.map(a => a.name).join(', ') || '-';
+                  const showGmpl = isMtnNetwork(batch.network);
                   return (
                     <tr key={batch.id} className="hover:bg-dark-700/30 transition-colors">
                       <td className="px-4 py-3 text-dark-300 whitespace-nowrap">{formatDate(batch.createdAt)}</td>
@@ -661,17 +854,26 @@ const OrderFiles = () => {
                       <td className="px-4 py-3 text-center text-white">{batch.totalItems}</td>
                       <td className="px-4 py-3 text-right text-white font-medium">GHS {batch.totalPrice.toFixed(2)}</td>
                       <td className="px-4 py-3 text-center">
-                        <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium border ${statusClass}`}>
-                          <StatusIcon className="w-3 h-3" /> {batch.status}
-                        </span>
+                        {statusBreakdown ? (
+                          <span className="text-dark-300 text-xs leading-relaxed">{statusBreakdown}</span>
+                        ) : (
+                          <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium border ${statusColors[batch.status] || statusColors.Pending}`}>
+                            {(() => { const StatusIcon = statusIcons[batch.status] || Clock; return <StatusIcon className="w-3 h-3" />; })()}
+                            {batch.status}
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-center">
-                        <GmplStatusBadge status={batch.gmplStatus} autoExport={batch.gmplAutoExport} />
+                        {showGmpl ? (
+                          <GmplStatusBadge status={batch.gmplStatus} autoExport={batch.gmplAutoExport} />
+                        ) : (
+                          <span className="text-dark-500 text-xs">N/A</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center justify-center gap-1.5">
                           <button onClick={() => fetchBatchDetail(batch.id)} className="px-2.5 py-1.5 bg-dark-700 text-dark-300 rounded-lg hover:bg-dark-600 hover:text-white text-xs transition-colors">View</button>
-                          {batch.gmplStatus === 'failed' && (
+                          {showGmpl && batch.gmplStatus === 'failed' && (
                             <button
                               onClick={() => handleSubmitBatchToGmpl(batch.id)}
                               disabled={submittingGmplBatchId === batch.id}
@@ -679,6 +881,16 @@ const OrderFiles = () => {
                               title={batch.gmplError || 'Retry GMPL'}
                             >
                               {submittingGmplBatchId === batch.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                            </button>
+                          )}
+                          {showGmpl && batch.gmplStatus === 'submitted' && (
+                            <button
+                              onClick={() => handleSyncGmplBatchStatus(batch.id)}
+                              disabled={syncingGmplBatchId === batch.id}
+                              className="px-2.5 py-1.5 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 rounded-lg hover:bg-cyan-500/20 text-xs transition-colors disabled:opacity-50"
+                              title="Sync status from GMPL"
+                            >
+                              {syncingGmplBatchId === batch.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                             </button>
                           )}
                           <button onClick={() => handleBulkStatusUpdate(batch.id)} className="px-2.5 py-1.5 bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 rounded-lg hover:bg-cyan-500/20 text-xs transition-colors">Status</button>
