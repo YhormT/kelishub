@@ -1,7 +1,10 @@
 const paymentService = require("../services/paymentService");
+const topupPaymentService = require("../services/topupPaymentService");
 const shopService = require("../services/shopService");
 const prisma = require("../config/db");
 const { verifyPaystackSignature } = require("../utils/paystackWebhook");
+const { effectiveShopPrice } = require("../utils/productPricing");
+const { emitTopupBalanceUpdate } = require("../utils/topupEvents");
 const {
   emitPendingQueueChanged,
   summarizeOrderItems,
@@ -108,47 +111,51 @@ const notifyPendingOrderCreated = (orderResult) => {
 // Initialize Paystack payment
 const initializePayment = async (req, res) => {
   try {
-    const { email, mobileNumber, amount, productId, productName } = req.body;
+    const { email, mobileNumber, productId } = req.body;
+    let { productName } = req.body;
 
-    if (!mobileNumber || !amount) {
+    if (!mobileNumber || !productId) {
       return res.status(400).json({
         success: false,
-        message: "Mobile number and amount are required",
+        message: "Mobile number and product are required",
       });
     }
 
-    // Check product availability before initializing payment
-    if (productId) {
-      const product = await prisma.product.findUnique({
-        where: { id: parseInt(productId) },
-      });
-      if (!product) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Product not found" });
-      }
-      if (product.stock <= 0) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Product is out of stock" });
-      }
-      if (product.shopStockClosed) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "Product is currently unavailable for purchase",
-          });
-      }
-      if (!product.showInShop) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message: "Product is not available in shop",
-          });
-      }
+    const product = await prisma.product.findUnique({
+      where: { id: parseInt(productId, 10) },
+    });
+    if (!product) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Product not found" });
     }
+    if (product.stock <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Product is out of stock" });
+    }
+    if (product.shopStockClosed) {
+      return res.status(400).json({
+        success: false,
+        message: "Product is currently unavailable for purchase",
+      });
+    }
+    if (!product.showInShop) {
+      return res.status(400).json({
+        success: false,
+        message: "Product is not available in shop",
+      });
+    }
+
+    const chargeAmount = effectiveShopPrice(product);
+    if (!chargeAmount || chargeAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Product has an invalid price",
+      });
+    }
+
+    productName = productName || product.name;
 
     // Build callback URL
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
@@ -157,7 +164,7 @@ const initializePayment = async (req, res) => {
     const result = await paymentService.initializePayment(
       email,
       mobileNumber,
-      amount,
+      chargeAmount,
       productId,
       productName,
       callbackUrl,
@@ -210,9 +217,17 @@ const handleWebhook = async (req, res) => {
       return res.status(200).json({ received: true, type: "referral_order" });
     }
 
-    // Skip topup webhooks - they're handled by topup routes
+    // Wallet top-ups (same Paystack webhook URL as shop payments)
     if (req.body.data?.reference?.startsWith("TOPUP-")) {
-      return res.status(200).json({ received: true, type: "topup" });
+      const topupResult = await topupPaymentService.handleTopupWebhook(req.body);
+      if (topupResult.success && topupResult.userId) {
+        await emitTopupBalanceUpdate(
+          topupResult.userId,
+          "TOPUP_PAYSTACK",
+          topupResult.amount || 0,
+        );
+      }
+      return res.status(200).json({ received: true, type: "topup", ...topupResult });
     }
 
     const result = await paymentService.handleWebhook(req.body);

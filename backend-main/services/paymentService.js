@@ -1,5 +1,6 @@
 const axios = require('axios');
 const prisma = require('../config/db');
+const { amountsMatch, paystackAmountToGhs } = require('../utils/productPricing');
 
 // Paystack API URLs
 const PAYSTACK_INITIALIZE_URL = 'https://api.paystack.co/transaction/initialize';
@@ -176,8 +177,19 @@ const verifyPayment = async (reference) => {
     const isPending = paymentStatus === 'pending' || paymentStatus === 'ongoing';
     const isFailed = paymentStatus === 'failed' || paymentStatus === 'abandoned';
 
+    const paidAmountGhs = paystackAmountToGhs(paymentData?.amount);
+    const amountMismatch =
+      isSuccess &&
+      paidAmountGhs != null &&
+      !amountsMatch(transaction.amount, paidAmountGhs);
+
     let status = transaction.status;
-    if (isSuccess) {
+    if (amountMismatch) {
+      status = 'FAILED';
+      console.error(
+        `[verifyPayment] Amount mismatch for ${reference}: expected GHS ${transaction.amount}, got GHS ${paidAmountGhs}`,
+      );
+    } else if (isSuccess) {
       status = 'SUCCESS';
     } else if (isFailed) {
       status = 'FAILED';
@@ -189,17 +201,19 @@ const verifyPayment = async (reference) => {
       data: {
         status: status,
         moolreCode: paymentData?.gateway_response || paymentStatus,
-        moolreMessage: paymentData?.message || `Payment ${paymentStatus}`
+        moolreMessage: amountMismatch
+          ? `Amount mismatch: expected GHS ${transaction.amount}, paid GHS ${paidAmountGhs}`
+          : paymentData?.message || `Payment ${paymentStatus}`
       }
     });
 
     return {
-      success: isSuccess,
+      success: isSuccess && !amountMismatch,
       pending: isPending,
       transactionId: transaction.id,
       externalRef: reference,
       status: status,
-      amount: paymentData?.amount / 100,
+      amount: paidAmountGhs ?? transaction.amount,
       paystackResponse: response.data
     };
 
@@ -400,6 +414,22 @@ const verifyAndCreateOrder = async (reference, shopService) => {
 
     const paymentData = response.data.data;
     const isSuccess = paymentData?.status === 'success';
+    const paidAmountGhs = paystackAmountToGhs(paymentData?.amount);
+    const amountMismatch =
+      isSuccess &&
+      paidAmountGhs != null &&
+      !amountsMatch(existingTransaction.amount, paidAmountGhs);
+
+    if (amountMismatch) {
+      await prisma.paymentTransaction.update({
+        where: { id: existingTransaction.id },
+        data: {
+          status: 'FAILED',
+          moolreMessage: `Amount mismatch: expected GHS ${existingTransaction.amount}, paid GHS ${paidAmountGhs}`,
+        },
+      });
+      return { success: false, error: 'Payment amount mismatch' };
+    }
 
     if (!isSuccess) {
       // Update transaction status
