@@ -14,6 +14,7 @@ import UploadExcel from '../components/UploadExcel';
 import PasteOrders from '../components/PasteOrders';
 import Storefront from '../components/Storefront';
 import FloatingChatButton from '../components/FloatingChatButton';
+import ProductCardPopup from '../components/ProductCardPopup';
 import { usePaystackTopupCallback } from '../hooks/usePaystackTopupCallback';
 
 const UserDashboard = () => {
