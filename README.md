@@ -261,7 +261,7 @@ Deploy from root **`render.yaml`** (Blueprint) or mirror settings manually.
 3. Set dashboard secrets: `PAYSTACK_SECRET_KEY`, `GMPL_API_KEY`.
 4. Attach custom domain **`kellishub.com`** to the **frontend** static site.
 5. Set **`VITE_API_URL`** on `kellishub-web` to `https://api.kellishub.com` (if not using Blueprint default), then redeploy the frontend.
-6. In Paystack Dashboard → Webhooks: `https://api.kellishub.com/api/payment/webhook` and `https://api.kellishub.com/api/topup/webhook`.
+6. In Paystack Dashboard → Webhooks, set **one** URL: `https://api.kellishub.com/api/payment/webhook` (handles shop orders and wallet top-ups).
 
 `JWT_SECRET` and `CHAT_ENCRYPTION_KEY` can be auto-generated. Production URLs in Blueprint:
 
@@ -274,7 +274,7 @@ Deploy from root **`render.yaml`** (Blueprint) or mirror settings manually.
 - [ ] Login as admin → `/admin` → **refresh** stays on admin (not landing page)
 - [ ] Agent cart submit debits wallet; external API returns 402 when balance is low
 - [ ] `GMPL_API_KEY` set on API service if using file orders
-- [ ] Paystack callbacks use live frontend URL; webhooks point at API host (`/api/payment/webhook`, `/api/topup/webhook`)
+- [ ] Paystack callbacks use live frontend URL; webhook points at `https://api.kellishub.com/api/payment/webhook`
 - [ ] `VITE_API_URL` on frontend points at API host (not `kellishub.com` unless API is proxied there)
 - [ ] Revoke old external API keys without `agentId`; create new per-agent keys in admin UI
 

@@ -2,6 +2,7 @@ const axios = require('axios');
 const prisma = require('../config/db');
 const { createTransaction } = require('./transactionService');
 const smsService = require('./smsService');
+const { amountsMatch, paystackAmountToGhs } = require('../utils/productPricing');
 
 // Paystack API URLs
 const PAYSTACK_INITIALIZE_URL = 'https://api.paystack.co/transaction/initialize';
@@ -155,6 +156,7 @@ const verifyTopupPayment = async (reference) => {
       success: true,
       alreadyProcessed: true,
       topupId: topUp.id,
+      userId: topUp.userId,
       amount: topUp.amount,
       message: 'Top-up already processed'
     };
@@ -181,6 +183,26 @@ const verifyTopupPayment = async (reference) => {
     const isSuccess = paymentStatus === 'success';
     const isPending = paymentStatus === 'pending' || paymentStatus === 'ongoing';
     const isFailed = paymentStatus === 'failed' || paymentStatus === 'abandoned';
+    const paidAmountGhs = paystackAmountToGhs(paymentData?.amount);
+    const amountMismatch =
+      isSuccess &&
+      paidAmountGhs != null &&
+      !amountsMatch(topUp.amount, paidAmountGhs);
+
+    if (amountMismatch) {
+      await prisma.topUp.update({
+        where: { id: topUp.id },
+        data: { status: 'Failed' },
+      });
+      return {
+        success: false,
+        topupId: topUp.id,
+        userId: topUp.userId,
+        amount: topUp.amount,
+        reference,
+        message: `Payment amount mismatch: expected GHS ${topUp.amount}, paid GHS ${paidAmountGhs}`,
+      };
+    }
 
     if (isSuccess) {
       // Credit user wallet using transaction
@@ -235,6 +257,7 @@ const verifyTopupPayment = async (reference) => {
         return {
           success: true,
           topupId: topUp.id,
+          userId: topUp.userId,
           amount: topUp.amount,
           newBalance: transaction.balance - loanDeducted,
           loanDeducted,

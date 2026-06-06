@@ -53,12 +53,9 @@ const TopUp = ({ isOpen, onClose, onSuccess }) => {
         amount: topupAmount
       }, { headers: getAuthHeaders() });
 
-      if (response.data.success) {
+      if (response.data.success && response.data.paymentUrl) {
         setExternalRef(response.data.externalRef);
-        setPaymentStep('redirect');
-        
-        // Open Paystack payment page
-        window.open(response.data.paymentUrl, '_blank');
+        window.location.href = response.data.paymentUrl;
       } else {
         setPaymentStep('amount');
         Swal.fire({

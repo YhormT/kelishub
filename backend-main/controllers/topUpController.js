@@ -1,30 +1,11 @@
 const topupPaymentService = require("../services/topupPaymentService");
 const prisma = require("../config/db");
 const { verifyPaystackSignature } = require("../utils/paystackWebhook");
+const { dashboardPathForRole } = require("../utils/dashboardPaths");
+const { emitTopupBalanceUpdate } = require("../utils/topupEvents");
 
 // Helper: emit 'balance-updated' WebSocket event to a specific user after a top-up
 // so the frontend wallet refreshes in real-time without requiring logout/login.
-const emitTopupBalanceUpdate = async (userId, type = 'TOPUP', amount = 0) => {
-  try {
-    const { io, userSockets } = require("../index");
-    if (!io || !userSockets) return;
-    const user = await prisma.user.findUnique({
-      where: { id: parseInt(userId) },
-      select: { loanBalance: true, adminLoanBalance: true, hasLoan: true }
-    });
-    if (!user) return;
-    const socketId = userSockets.get(String(userId)) || userSockets.get(userId);
-    if (socketId) {
-      io.to(socketId).emit('balance-updated', {
-        loanBalance: user.loanBalance,
-        adminLoanBalance: user.adminLoanBalance,
-        hasLoan: user.hasLoan,
-        type,
-        amount
-      });
-    }
-  } catch (e) { /* socket emit is best-effort */ }
-};
 
 // Initialize Paystack payment for wallet top-up
 const initializeTopup = async (req, res) => {
@@ -53,7 +34,8 @@ const initializeTopup = async (req, res) => {
       });
     }
 
-    const callbackUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/dashboard?topup=callback`;
+    const dashPath = dashboardPathForRole(req.user?.role);
+    const callbackUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}${dashPath}?topup=callback`;
     const result = await topupPaymentService.initializeTopupPayment(userId, amount, callbackUrl);
 
     if (result.success) {
@@ -108,7 +90,7 @@ const verifyTopup = async (req, res) => {
   }
 };
 
-// Handle Paystack webhook for top-ups
+// Handle Paystack webhook for top-ups (legacy URL — prefer /api/payment/webhook)
 const handleWebhook = async (req, res) => {
   try {
     const signature = req.headers["x-paystack-signature"];
@@ -118,6 +100,9 @@ const handleWebhook = async (req, res) => {
     }
 
     const result = await topupPaymentService.handleTopupWebhook(req.body);
+    if (result.success && result.userId) {
+      await emitTopupBalanceUpdate(result.userId, "TOPUP_PAYSTACK", result.amount || 0);
+    }
     res.status(200).json(result);
   } catch (error) {
     console.error("Error handling top-up webhook:", error);
