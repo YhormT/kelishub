@@ -160,7 +160,8 @@ const OrderTracker = ({ isOpen, onClose, onFraudDetected }) => {
             airteltigo: { count: 0, total: 0 },
           },
         );
-        const allAlerts = res.data.fraudAlerts || [];
+        const allAlerts =
+          res.data.allFraudAlerts || res.data.fraudAlerts || [];
         const serverResolvedIds = Array.isArray(res.data.resolvedIds)
           ? res.data.resolvedIds
           : [];

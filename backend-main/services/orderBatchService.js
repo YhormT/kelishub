@@ -138,9 +138,12 @@ const getPendingOrderCountsByNetwork = async () => {
   };
 };
 
+/** Default purchaser orders combined into one export batch when maxOrders is omitted. */
+const DEFAULT_ORDERS_PER_BATCH = 3;
+
 /**
- * Export pending orders by network — one batch per purchaser order (not one mega-batch).
- * @param {number|null|undefined} maxOrders — cap orders exported this run (FIFO). Omit/null = all pending orders.
+ * Export pending orders by network — groups up to maxOrders purchaser orders into one batch.
+ * @param {number|null|undefined} maxOrders — orders per batch (FIFO). Default 3. Use 0 for all pending in one batch.
  */
 const exportPendingByNetwork = async (adminUserId, network, { maxOrders } = {}) => {
   return await prisma.$transaction(async (tx) => {
@@ -172,81 +175,82 @@ const exportPendingByNetwork = async (adminUserId, network, { maxOrders } = {}) 
     }
 
     const exportStamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, "-");
-    const batches = [];
-
-    const createBatchForOrder = async (orderId, items) => {
-      let totalPrice = 0;
-      for (const item of items) {
-        totalPrice += (item.productPrice || item.product.price) * item.quantity;
-      }
-
-      const filename = `${network.toUpperCase()}_order_${orderId}_${exportStamp}.xlsx`;
-      const batch = await tx.orderBatch.create({
-        data: {
-          userId: parseInt(adminUserId),
-          filename,
-          network: network.toUpperCase(),
-          totalItems: items.length,
-          totalPrice,
-          status: "Pending"
-        }
-      });
-
-      await tx.order.updateMany({
-        where: { id: orderId, batchId: null },
-        data: { batchId: batch.id }
-      });
-
-      const itemIds = items.map((item) => item.id);
-      await tx.orderItem.updateMany({
-        where: { id: { in: itemIds } },
-        data: { status: "Processing", batchId: batch.id }
-      });
-
-      await tx.orderBatch.update({
-        where: { id: batch.id },
-        data: { status: "Processing" }
-      });
-
-      const rows = items.map((item) => ({
-        orderId: item.orderId,
-        itemId: item.id,
-        agent: item.order.user?.name || "N/A",
-        phone: item.mobileNumber || item.order.mobileNumber || "",
-        product: item.productName || item.product.name,
-        bundle: item.productDescription || item.product.description,
-        price: item.productPrice || item.product.price,
-        quantity: item.quantity,
-        status: "Processing"
-      }));
-
-      return { batch, rows, orderId, totalPrice, totalItems: items.length };
-    };
-
     const orderEntries = [...byOrder.entries()];
-    const orderLimit =
-      maxOrders != null && maxOrders > 0
-        ? Math.min(maxOrders, orderEntries.length)
-        : orderEntries.length;
-    const ordersToExport = orderEntries.slice(0, orderLimit);
 
-    for (const [orderId, items] of ordersToExport) {
-      batches.push(await createBatchForOrder(orderId, items));
+    const perBatchLimit =
+      maxOrders === 0
+        ? orderEntries.length
+        : Math.min(
+            maxOrders != null && maxOrders > 0
+              ? maxOrders
+              : DEFAULT_ORDERS_PER_BATCH,
+            orderEntries.length
+          );
+    const ordersToExport = orderEntries.slice(0, perBatchLimit);
+
+    const allItems = ordersToExport.flatMap(([, items]) => items);
+    let totalPrice = 0;
+    for (const item of allItems) {
+      totalPrice += (item.productPrice || item.product.price) * item.quantity;
     }
 
-    const allRows = batches.flatMap((b) => b.rows);
-    const totalPrice = batches.reduce((sum, b) => sum + b.totalPrice, 0);
-    const exportedItemCount = batches.reduce((sum, b) => sum + b.totalItems, 0);
+    const orderIds = ordersToExport.map(([orderId]) => orderId);
+    const orderLabel =
+      orderIds.length === 1
+        ? `order_${orderIds[0]}`
+        : `${orderIds.length}orders_${orderIds[0]}-${orderIds[orderIds.length - 1]}`;
+    const filename = `${network.toUpperCase()}_${orderLabel}_${exportStamp}.xlsx`;
+
+    const batch = await tx.orderBatch.create({
+      data: {
+        userId: parseInt(adminUserId, 10),
+        filename,
+        network: network.toUpperCase(),
+        totalItems: allItems.length,
+        totalPrice,
+        status: "Pending",
+      },
+    });
+
+    await tx.order.updateMany({
+      where: { id: { in: orderIds }, batchId: null },
+      data: { batchId: batch.id },
+    });
+
+    const itemIds = allItems.map((item) => item.id);
+    await tx.orderItem.updateMany({
+      where: { id: { in: itemIds } },
+      data: { status: "Processing", batchId: batch.id },
+    });
+
+    await tx.orderBatch.update({
+      where: { id: batch.id },
+      data: { status: "Processing" },
+    });
+
+    const rows = allItems.map((item) => ({
+      orderId: item.orderId,
+      itemId: item.id,
+      agent: item.order.user?.name || "N/A",
+      phone: item.mobileNumber || item.order.mobileNumber || "",
+      product: item.productName || item.product.name,
+      bundle: item.productDescription || item.product.description,
+      price: item.productPrice || item.product.price,
+      quantity: item.quantity,
+      status: "Processing",
+    }));
+
+    const batchEntry = { batch, rows, orderIds, totalPrice, totalItems: allItems.length };
 
     return {
-      batches,
-      batch: batches[0]?.batch,
-      rows: allRows,
-      totalItems: exportedItemCount,
+      batches: [batchEntry],
+      batch,
+      rows,
+      totalItems: allItems.length,
       totalPrice,
-      orderCount: batches.length,
+      orderCount: orderIds.length,
       pendingOrderCount: orderEntries.length,
-      remainingPendingOrders: Math.max(0, orderEntries.length - batches.length),
+      remainingPendingOrders: Math.max(0, orderEntries.length - orderIds.length),
     };
   }, { timeout: 60000 });
 };
@@ -316,11 +320,14 @@ const getAllBatches = async (page = 1, limit = 20) => {
       }
     }
 
+    const orderIds = [...new Set(batch.items.map(i => i.order?.id).filter(Boolean))];
+
     return {
       id: batch.id,
       filename: batch.filename,
       network: batch.network,
       totalItems,
+      orderCount: orderIds.length,
       totalPrice: batch.totalPrice,
       status: overallStatus,
       statusCounts,
@@ -333,7 +340,7 @@ const getAllBatches = async (page = 1, limit = 20) => {
       createdAt: batch.createdAt,
       exportedBy: batch.user,
       agents,
-      orderIds: [...new Set(batch.items.map(i => i.order?.id).filter(Boolean))]
+      orderIds,
     };
   });
 

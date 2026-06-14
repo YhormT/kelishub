@@ -969,30 +969,40 @@ const AdminDashboard = () => {
                 </div>
               </div>
               <div className="flex items-center gap-2 sm:gap-3">
-                {fraudAlerts.length > 0 && (
-                  <button
-                    onClick={() => {
-                      setShowSuspiciousActivity(true);
-                      setFraudBlinking(false);
-                    }}
-                    className={`relative flex items-center gap-1.5 px-3 py-2 bg-red-500/20 border-2 border-red-500 rounded-xl text-red-400 font-bold text-xs sm:text-sm ${fraudBlinking ? "animate-pulse" : ""}`}
-                    style={
-                      fraudBlinking
-                        ? {
-                            animation:
-                              "pulse 0.5s ease-in-out infinite, borderBlink 0.3s ease-in-out infinite alternate",
-                          }
-                        : {}
-                    }
-                    title="Suspicious activity detected!"
-                  >
-                    <AlertTriangle className="w-4 h-4 sm:w-5 sm:h-5 animate-bounce" />
-                    <span className="hidden sm:inline">ALERT</span>
+                <button
+                  onClick={() => {
+                    setShowSuspiciousActivity(true);
+                    setFraudBlinking(false);
+                  }}
+                  className={`relative flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs sm:text-sm ${
+                    fraudAlerts.length > 0
+                      ? `bg-red-500/20 border-2 border-red-500 text-red-400 ${fraudBlinking ? "animate-pulse" : ""}`
+                      : "bg-dark-800 border border-dark-600 text-dark-400 hover:text-dark-300 hover:border-dark-500"
+                  }`}
+                  style={
+                    fraudBlinking && fraudAlerts.length > 0
+                      ? {
+                          animation:
+                            "pulse 0.5s ease-in-out infinite, borderBlink 0.3s ease-in-out infinite alternate",
+                        }
+                      : {}
+                  }
+                  title={
+                    fraudAlerts.length > 0
+                      ? "Suspicious activity detected!"
+                      : "Open suspicious activity monitor"
+                  }
+                >
+                  <AlertTriangle
+                    className={`w-4 h-4 sm:w-5 sm:h-5 ${fraudAlerts.length > 0 ? "animate-bounce" : ""}`}
+                  />
+                  <span className="hidden sm:inline">ALERT</span>
+                  {fraudAlerts.length > 0 && (
                     <span className="bg-red-500 text-white text-[10px] font-bold rounded-full min-w-4 h-4 px-1 flex items-center justify-center">
                       {fraudAlerts.length}
                     </span>
-                  </button>
-                )}
+                  )}
+                </button>
                 <button
                   onClick={() => setShowBeneficiaryModal(true)}
                   className="p-2 bg-dark-800 rounded-xl hover:bg-dark-700"

@@ -62,14 +62,15 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
         headers: getAuthHeaders(),
       });
       if (res.data.success) {
-        const alerts = res.data.fraudAlerts || [];
+        const allAlerts =
+          res.data.allFraudAlerts || res.data.fraudAlerts || [];
         const serverResolvedIds = Array.isArray(res.data.resolvedIds)
           ? res.data.resolvedIds
           : [];
-        setFraudAlerts(alerts);
+        setFraudAlerts(allAlerts);
         setResolvedIds(serverResolvedIds);
 
-        const activeAlerts = alerts.filter(
+        const activeAlerts = allAlerts.filter(
           (a) => !serverResolvedIds.includes(`${a.orderId}-${a.itemId}`),
         );
 
@@ -121,13 +122,14 @@ const SuspiciousActivity = ({ isOpen, onClose, onAlertsUpdate }) => {
 
   const handleResolve = async (orderId, itemId) => {
     try {
-      await axios.post(
+      const res = await axios.post(
         `${BASE_URL}/order/admin/resolve-alert`,
         { orderId, itemId },
         { headers: getAuthHeaders() },
       );
-      const key = buildAlertKey(orderId, itemId);
-      setResolvedIds((prev) => Array.from(new Set([...prev, key])));
+      const newKeys = res.data?.keys || [buildAlertKey(orderId, itemId)];
+      setResolvedIds((prev) => Array.from(new Set([...prev, ...newKeys])));
+      await fetchAlerts();
     } catch (error) {
       console.error("Error resolving alert:", error);
     }
