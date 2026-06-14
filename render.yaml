@@ -41,7 +41,7 @@ services:
       - key: FRONTEND_URL
         value: https://kellishub.com
       - key: GMPL_API_URL
-        value: https://api.gmpl.com
+        value: https://api.getmorepaylessdatahouse.net/api/v1
       - key: GMPL_API_KEY
         sync: false
       - key: GMPL_AUTO_EXPORT

@@ -1,5 +1,6 @@
 const prisma = require('../config/db');
 const orderBatchService = require('./orderBatchService');
+const gmplService = require('./gmplService');
 const {
   buildSupplierExcelBuffer,
   submitRowsToGmpl,
@@ -35,7 +36,11 @@ const getConfig = () => ({
 
 const extractGmplResponseId = (gmplResult) => {
   if (!gmplResult || typeof gmplResult !== 'object') return null;
-  const id = gmplResult.id ?? gmplResult.orderId ?? gmplResult.batchId;
+  const id =
+    gmplResult.id ??
+    gmplResult.referenceCode ??
+    gmplResult.batchId ??
+    gmplResult.orderId;
   return id != null ? String(id) : null;
 };
 
@@ -145,7 +150,10 @@ const submitExistingBatchToGmpl = async (batchId, { incrementRetry = false } = {
     incrementRetry && existing.gmplStatus === 'failed';
 
   try {
-    const gmplResult = await submitRowsToGmpl(rows, batch.network);
+    const gmplResult = await submitRowsToGmpl(rows, batch.network, {
+      idempotencyKey: `kellishub-batch-${batch.id}`,
+      batchId: batch.id,
+    });
     const responseId = extractGmplResponseId(gmplResult);
     await recordGmplSubmission(batch.id, {
       status: 'submitted',
@@ -231,7 +239,10 @@ const exportPendingWithGmpl = async (
       await recordGmplSubmission(batch.id, { status: 'skipped' });
     } else {
       try {
-        gmplResult = await submitRowsToGmpl(batchRows, network);
+        gmplResult = await submitRowsToGmpl(batchRows, batch.network, {
+          idempotencyKey: `kellishub-batch-${batch.id}`,
+          batchId: batch.id,
+        });
         gmplResponseId = extractGmplResponseId(gmplResult);
         await recordGmplSubmission(batch.id, {
           status: 'submitted',
@@ -473,6 +484,7 @@ const getAutoExportStatus = () => {
     maxOrdersPerCycle: config.maxOrdersPerCycle,
     retryFailed: config.retryFailed,
     maxRetries: config.maxRetries,
+    apiUrl: process.env.GMPL_API_URL || gmplService.DEFAULT_GMPL_API_URL,
     statusSyncEnabled: process.env.GMPL_STATUS_SYNC !== 'false',
   };
 };

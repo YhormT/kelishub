@@ -1095,11 +1095,11 @@ exports.getGmplAutoExportStatus = async (req, res) => {
 
 exports.handleGmplWebhook = async (req, res) => {
   try {
-    if (!gmplStatusSyncService.verifyWebhookSecret(req)) {
-      return res.status(401).json({ success: false, message: "Invalid webhook secret" });
+    if (!gmplStatusSyncService.verifyWebhookSignature(req)) {
+      return res.status(401).json({ success: false, message: "Invalid webhook signature" });
     }
 
-    const result = await gmplStatusSyncService.applyFulfillmentUpdate(req.body);
+    const result = await gmplStatusSyncService.handleGmplWebhookEvent(req.body);
     res.json({ success: true, ...result });
   } catch (error) {
     console.error("[handleGmplWebhook]", error.message);
@@ -1159,12 +1159,15 @@ exports.submitAdminGmplFile = async (req, res) => {
       });
     }
 
-    const gmplService = require("../services/gmplService");
-    const { networkToGmplProvider } = require("../utils/gmplOrderExport");
-    const gmplResult = await gmplService.submitAgentOrderFile(
-      filePath,
-      networkToGmplProvider(network),
-    );
+    const {
+      submitRowsToGmpl,
+      parseExcelFileToRows,
+    } = require("../utils/gmplOrderExport");
+    const crypto = require("crypto");
+    const rows = parseExcelFileToRows(filePath);
+    const gmplResult = await submitRowsToGmpl(rows, network, {
+      idempotencyKey: `kellishub-admin-${crypto.randomUUID()}`,
+    });
 
     res.json({
       success: true,
