@@ -75,6 +75,87 @@ const createShopOrder = async (productId, mobileNumber, customerName) => {
   return order;
 };
 
+// Atomic, idempotent order creation keyed on a payment transaction's externalRef.
+// Used by ALL paid-shop paths (webhook, verify, reconciliation) so a single
+// Paystack charge can never produce more than one order.
+const createShopOrderForTransaction = async (externalRef, productId, mobileNumber) => {
+  const shopUser = await getOrCreateShopUser();
+
+  return await prisma.$transaction(
+    async (tx) => {
+      const transaction = await tx.paymentTransaction.findUnique({
+        where: { externalRef },
+      });
+
+      if (!transaction) {
+        return { created: false, error: "Transaction not found" };
+      }
+
+      // Already linked → return the existing order (idempotent)
+      if (transaction.orderId) {
+        const existingOrder = await tx.order.findUnique({
+          where: { id: transaction.orderId },
+          include: { items: true },
+        });
+
+        if (existingOrder) {
+          return {
+            created: false,
+            alreadyExists: true,
+            orderId: transaction.orderId,
+            order: existingOrder,
+          };
+        }
+
+        // Stale reference (order was deleted) — clear and recreate
+        await tx.paymentTransaction.update({
+          where: { externalRef },
+          data: { orderId: null },
+        });
+      }
+
+      const product = await tx.product.findUnique({ where: { id: productId } });
+      if (!product) {
+        return { created: false, error: "Product not found" };
+      }
+
+      const order = await tx.order.create({
+        data: {
+          userId: shopUser.id,
+          mobileNumber,
+          status: "Pending",
+          items: {
+            create: [
+              {
+                productId,
+                quantity: 1,
+                mobileNumber,
+                status: "Pending",
+                productName: product.name,
+                productPrice:
+                  product.usePromoPrice && product.promoPrice != null
+                    ? product.promoPrice
+                    : product.price,
+                productDescription: product.description,
+              },
+            ],
+          },
+        },
+        include: { items: true },
+      });
+
+      // Link transaction → order in the SAME transaction (closes the race window)
+      await tx.paymentTransaction.update({
+        where: { externalRef },
+        data: { orderId: order.id },
+      });
+
+      return { created: true, orderId: order.id, order };
+    },
+    { timeout: 15000 },
+  );
+};
+
 // Track orders by mobile number
 const trackOrdersByMobile = async (mobileNumber) => {
   // Clean and generate phone number variants for comprehensive search
@@ -147,5 +228,6 @@ const trackOrdersByMobile = async (mobileNumber) => {
 module.exports = {
   getOrCreateShopUser,
   createShopOrder,
+  createShopOrderForTransaction,
   trackOrdersByMobile
 };

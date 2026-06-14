@@ -3,6 +3,7 @@ const cache = require("../utils/cache");
 
 const { createTransaction } = require("./transactionService");
 const userService = require("./userService");
+const orderBatchService = require("./orderBatchService");
 
 const submitCart = async (userId, mobileNumber = null, retries = 3) => {
   for (let attempt = 1; attempt <= retries; attempt++) {
@@ -564,7 +565,7 @@ const getUserCompletedOrders = async (userId) => {
 
 const updateSingleOrderItemStatus = async (itemId, newStatus) => {
   try {
-    return await prisma.$transaction(
+    const result = await prisma.$transaction(
       async (tx) => {
         const item = await tx.orderItem.findUnique({
           where: { id: parseInt(itemId) },
@@ -606,7 +607,6 @@ const updateSingleOrderItemStatus = async (itemId, newStatus) => {
           }
         }
 
-        // Update single order item status
         const updatedItem = await tx.orderItem.update({
           where: { id: parseInt(itemId) },
           data: { status: newStatus },
@@ -615,11 +615,19 @@ const updateSingleOrderItemStatus = async (itemId, newStatus) => {
         return {
           success: true,
           item: updatedItem,
+          batchId: updatedItem.batchId,
           message: `Successfully updated item #${itemId} to ${newStatus}`,
         };
       },
       { timeout: 15000 },
     );
+
+    if (result?.batchId && newStatus === "Completed") {
+      await orderBatchService.refreshBatchOverallStatus(result.batchId);
+      await orderBatchService.markGmplCompletedIfFulfilled(result.batchId);
+    }
+
+    return result;
   } catch (error) {
     console.error("Error updating single order item status:", error);
     throw new Error("Failed to update order item status");

@@ -1001,6 +1001,7 @@ exports.exportPendingOrders = async (req, res) => {
       network,
       {
         submitToGmpl: submitToGmpl !== false && isGmplNetwork(network),
+        maxOrders: gmplAutoExportService.getConfig().maxOrdersPerCycle || 3,
       },
     );
     const {

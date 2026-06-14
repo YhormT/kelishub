@@ -10,91 +10,10 @@ const {
   summarizeOrderItems,
 } = require("../utils/orderEvents");
 
-// Atomic order creation - prevents duplicate orders from webhook + verify race condition
-const createOrderIfNotExists = async (externalRef, productId, mobileNumber) => {
-  // Get or create the shop user outside the transaction to avoid unnecessary locking
-  const shopUser = await shopService.getOrCreateShopUser();
-
-  return await prisma.$transaction(
-    async (tx) => {
-      // Re-check inside transaction to prevent race condition
-      const transaction = await tx.paymentTransaction.findUnique({
-        where: { externalRef },
-      });
-
-      if (!transaction) {
-        return { created: false, error: "Transaction not found" };
-      }
-
-      // If order already linked, return existing
-      if (transaction.orderId) {
-        const existingOrder = await tx.order.findUnique({
-          where: { id: transaction.orderId },
-        });
-
-        // Handle orphaned orderId (order was deleted but reference remained)
-        if (!existingOrder) {
-          console.warn(
-            `[createOrderIfNotExists] Orphaned orderId ${transaction.orderId} found in PaymentTransaction ${externalRef}. Order was likely deleted. Clearing reference.`,
-          );
-          await tx.paymentTransaction.update({
-            where: { externalRef },
-            data: { orderId: null },
-          });
-          // Continue to create a new order below
-        } else {
-          return {
-            created: false,
-            alreadyExists: true,
-            orderId: transaction.orderId,
-            order: existingOrder,
-          };
-        }
-      }
-
-      // Get the product
-      const product = await tx.product.findUnique({ where: { id: productId } });
-      if (!product) {
-        return { created: false, error: "Product not found" };
-      }
-
-      // Create the order within the same transaction
-      const order = await tx.order.create({
-        data: {
-          userId: shopUser.id,
-          mobileNumber: mobileNumber,
-          status: "Pending",
-          items: {
-            create: [
-              {
-                productId: productId,
-                quantity: 1,
-                mobileNumber: mobileNumber,
-                status: "Pending",
-                productName: product.name,
-                productPrice:
-                  product.usePromoPrice && product.promoPrice != null
-                    ? product.promoPrice
-                    : product.price,
-                productDescription: product.description,
-              },
-            ],
-          },
-        },
-        include: { items: true },
-      });
-
-      // Link transaction to order atomically
-      await tx.paymentTransaction.update({
-        where: { externalRef },
-        data: { orderId: order.id },
-      });
-
-      return { created: true, orderId: order.id, order };
-    },
-    { timeout: 15000 },
-  );
-};
+// Atomic order creation - prevents duplicate orders across webhook, verify, and
+// reconciliation paths. Delegates to the single shared atomic implementation.
+const createOrderIfNotExists = (externalRef, productId, mobileNumber) =>
+  shopService.createShopOrderForTransaction(externalRef, productId, mobileNumber);
 
 const notifyPendingOrderCreated = (orderResult) => {
   if (!orderResult?.created || !orderResult?.order) return;
