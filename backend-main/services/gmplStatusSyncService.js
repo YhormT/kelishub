@@ -129,6 +129,10 @@ const refreshBatchOverallStatus = async (batchId) => {
       data: { status },
     });
   }
+
+  if (status === 'Completed') {
+    await orderBatchService.markGmplCompletedIfFulfilled(batchId);
+  }
 };
 
 const applyFulfillmentUpdate = async (payload = {}) => {
@@ -171,10 +175,7 @@ const applyFulfillmentUpdate = async (payload = {}) => {
   }
 
   if (overall === 'Completed') {
-    await prisma.orderBatch.update({
-      where: { id: batch.id },
-      data: { gmplStatus: 'submitted', gmplError: null },
-    });
+    await orderBatchService.markGmplCompletedIfFulfilled(batch.id);
   } else if (payload.status && mapGmplStatus(payload.status) === 'Failed') {
     await prisma.orderBatch.update({
       where: { id: batch.id },

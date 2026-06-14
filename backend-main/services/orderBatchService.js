@@ -390,6 +390,65 @@ const getBatchById = async (batchId) => {
   return batch;
 };
 
+const computeBatchStatusFromItems = (items) => {
+  const total = items.length;
+  if (total === 0) return "Pending";
+
+  const completed = items.filter((i) => i.status === "Completed").length;
+  const processing = items.filter((i) => i.status === "Processing").length;
+
+  if (completed === total) return "Completed";
+  if (processing > 0 || completed > 0) return "Processing";
+  return "Pending";
+};
+
+const refreshBatchOverallStatus = async (batchId, tx = prisma) => {
+  const batch = await tx.orderBatch.findUnique({
+    where: { id: parseInt(batchId, 10) },
+    include: { items: { select: { status: true } } },
+  });
+  if (!batch) return null;
+
+  const status = computeBatchStatusFromItems(batch.items);
+  if (status !== batch.status) {
+    await tx.orderBatch.update({
+      where: { id: batch.id },
+      data: { status },
+    });
+  }
+
+  return status;
+};
+
+/** When a batch is fully fulfilled, close out GMPL tracking (manual or supplier path). */
+const markGmplCompletedIfFulfilled = async (batchId, tx = prisma) => {
+  const batch = await tx.orderBatch.findUnique({
+    where: { id: parseInt(batchId, 10) },
+    include: { items: { select: { status: true } } },
+  });
+  if (!batch) return false;
+
+  const allCompleted =
+    batch.items.length > 0 &&
+    batch.items.every((i) => i.status === "Completed");
+  const batchCompleted = batch.status === "Completed" || allCompleted;
+
+  if (!batchCompleted) return false;
+
+  if (batch.gmplStatus === "completed") return true;
+
+  await tx.orderBatch.update({
+    where: { id: batch.id },
+    data: {
+      gmplStatus: "completed",
+      gmplError: null,
+      status: "Completed",
+    },
+  });
+
+  return true;
+};
+
 /**
  * Update status of all order items in a batch (auto-refund on cancel)
  */
@@ -459,6 +518,10 @@ const updateBatchStatus = async (batchId, newStatus) => {
       data: { status: newStatus }
     });
 
+    if (newStatus === "Completed") {
+      await markGmplCompletedIfFulfilled(parseInt(batchId), tx);
+    }
+
     return {
       success: true, batchId: parseInt(batchId), newStatus, updatedItems: updatedCount, totalRefund,
       message: `Batch #${batchId}: ${updatedCount} items updated to ${newStatus}${totalRefund > 0 ? `, refunded GHS ${totalRefund.toFixed(2)}` : ''}`
@@ -503,7 +566,12 @@ const updateBatchOrderItemStatus = async (batchId, itemId, newStatus) => {
       data: { status: newStatus }
     });
 
-    return { success: true, item: updatedItem };
+    const batchStatus = await refreshBatchOverallStatus(parseInt(batchId), tx);
+    if (batchStatus === "Completed") {
+      await markGmplCompletedIfFulfilled(parseInt(batchId), tx);
+    }
+
+    return { success: true, item: updatedItem, batchStatus };
   }, { timeout: 15000 });
 };
 
@@ -547,6 +615,8 @@ module.exports = {
   exportPendingByNetwork,
   getAllBatches,
   getBatchById,
+  refreshBatchOverallStatus,
+  markGmplCompletedIfFulfilled,
   updateBatchStatus,
   updateBatchOrderItemStatus,
   getBatchForDownload

@@ -54,6 +54,10 @@ const recordGmplSubmission = async (
     data.gmplError = null;
   }
 
+  if (status === 'completed') {
+    data.gmplError = null;
+  }
+
   if (autoExport) {
     data.gmplAutoExport = true;
   }
@@ -92,11 +96,32 @@ const getSystemAdminUserId = async () => {
 const submitExistingBatchToGmpl = async (batchId, { incrementRetry = false } = {}) => {
   const existing = await prisma.orderBatch.findUnique({
     where: { id: parseInt(batchId, 10) },
-    select: { id: true, network: true, gmplStatus: true },
+    select: {
+      id: true,
+      network: true,
+      gmplStatus: true,
+      status: true,
+      items: { select: { status: true } },
+    },
   });
 
   if (!existing) {
     throw new Error('Order batch not found');
+  }
+
+  const allItemsCompleted =
+    existing.items.length > 0 &&
+    existing.items.every((i) => i.status === 'Completed');
+
+  if (existing.status === 'Completed' || allItemsCompleted || existing.gmplStatus === 'completed') {
+    await orderBatchService.markGmplCompletedIfFulfilled(existing.id);
+    return {
+      success: true,
+      message: `Batch #${existing.id} already fulfilled — GMPL closed.`,
+      batchId: existing.id,
+      gmplStatus: 'completed',
+      alreadyFulfilled: true,
+    };
   }
 
   if (existing.gmplStatus === 'submitted') {
@@ -259,15 +284,40 @@ const exportPendingWithGmpl = async (
   };
 };
 
+const reconcileFulfilledFailedBatches = async () => {
+  const stuck = await prisma.orderBatch.findMany({
+    where: {
+      gmplStatus: 'failed',
+      network: GMPL_NETWORK,
+    },
+    select: { id: true },
+    take: 50,
+  });
+
+  let resolved = 0;
+  for (const batch of stuck) {
+    const closed = await orderBatchService.markGmplCompletedIfFulfilled(batch.id);
+    if (closed) {
+      resolved++;
+      console.log(`[GMPL Auto] Batch #${batch.id} fulfilled — GMPL marked completed`);
+    }
+  }
+
+  return resolved;
+};
+
 const retryFailedBatches = async () => {
   const { retryFailed, maxRetries } = getConfig();
   if (!retryFailed || !process.env.GMPL_API_KEY) return [];
+
+  await reconcileFulfilledFailedBatches();
 
   const failedBatches = await prisma.orderBatch.findMany({
     where: {
       gmplStatus: 'failed',
       gmplRetryCount: { lt: maxRetries },
       network: GMPL_NETWORK,
+      status: { not: 'Completed' },
     },
     orderBy: { createdAt: 'asc' },
     take: 5,
@@ -301,13 +351,12 @@ const autoExportPendingNetworks = async (adminUserId) => {
 
   for (const network of GMPL_AUTO_NETWORKS) {
     const pendingOrders = orderCounts[network]?.count || 0;
-    // Single pending order must go through (minPending defaults to 1 order, not 3)
     if (pendingOrders < minPending) continue;
 
     const maxOrders =
       maxOrdersPerCycle > 0
         ? Math.min(maxOrdersPerCycle, pendingOrders)
-        : undefined;
+        : pendingOrders;
 
     try {
       const result = await exportPendingWithGmpl(adminUserId, network, {
@@ -401,60 +450,15 @@ const startAutoGmplScheduler = () => {
 };
 
 /**
- * Export pending MTN orders right away when a new order arrives (does not wait for scheduler).
- * Respects maxOrdersPerCycle cap; a single pending order is exported immediately.
+ * Export pending MTN orders on the scheduler (up to maxOrdersPerCycle per run).
+ * Immediate per-order export is disabled so orders are sent in groups of 3.
  */
-const tryImmediateAutoExport = async (payload = {}) => {
-  const config = getConfig();
-  if (!config.enabled || !process.env.GMPL_API_KEY) return { skipped: true };
-  if (payload.type === 'exported') return { skipped: true };
-  if (!payload.networks?.MTN) return { skipped: true };
-  if (cycleRunning) return { skipped: true, reason: 'cycle_running' };
-
-  cycleRunning = true;
-  try {
-    const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
-    const pendingOrders = orderCounts.MTN?.count || 0;
-    if (pendingOrders < config.minPending) {
-      return { skipped: true, reason: 'below_min_pending_orders' };
-    }
-
-    const maxOrders =
-      config.maxOrdersPerCycle > 0
-        ? Math.min(config.maxOrdersPerCycle, pendingOrders)
-        : pendingOrders;
-
-    const adminUserId = await getSystemAdminUserId();
-    const result = await exportPendingWithGmpl(adminUserId, GMPL_NETWORK, {
-      submitToGmpl: true,
-      autoExport: true,
-      maxOrders,
-    });
-
-    console.log(
-      `[GMPL Auto] Immediate export: ${result.batchCount} batch(es)` +
-        (result.remainingPendingOrders
-          ? ` (${result.remainingPendingOrders} order(s) still pending)`
-          : '')
-    );
-
-    return { exported: true, ...result };
-  } catch (err) {
-    if (!err.message?.includes('No pending')) {
-      console.error('[GMPL Auto] Immediate export error:', err.message);
-    }
-    return { skipped: true, error: err.message };
-  } finally {
-    cycleRunning = false;
-  }
+const tryImmediateAutoExport = async () => {
+  return { skipped: true, reason: 'batched_scheduler_only' };
 };
 
-const scheduleImmediateAutoExport = (payload = {}) => {
-  if (!payload.orderId || payload.type === 'exported') return;
-  if (!payload.networks?.MTN) return;
-  setImmediate(() => {
-    tryImmediateAutoExport(payload).catch(() => {});
-  });
+const scheduleImmediateAutoExport = () => {
+  // No-op: wait for scheduler to export up to GMPL_MAX_ORDERS_PER_CYCLE (default 3).
 };
 
 const getAutoExportStatus = () => {

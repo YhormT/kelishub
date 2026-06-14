@@ -256,11 +256,25 @@ const handleWebhook = async (webhookData) => {
 
   // Determine status from webhook event
   // charge.success = payment successful
-  const isSuccess = event === 'charge.success' && data.status === 'success';
+  const chargeSucceeded = event === 'charge.success' && data.status === 'success';
   const isFailed = event === 'charge.failed' || data.status === 'failed';
 
+  // Reject underpayments: the amount Paystack received must match what we charged.
+  const paidAmountGhs = paystackAmountToGhs(data.amount);
+  const amountMismatch =
+    chargeSucceeded &&
+    paidAmountGhs != null &&
+    !amountsMatch(transaction.amount, paidAmountGhs);
+
+  const isSuccess = chargeSucceeded && !amountMismatch;
+
   let newStatus = transaction.status;
-  if (isSuccess) {
+  if (amountMismatch) {
+    newStatus = 'FAILED';
+    console.error(
+      `[handleWebhook] Amount mismatch for ${externalRef}: expected GHS ${transaction.amount}, paid GHS ${paidAmountGhs}`,
+    );
+  } else if (isSuccess) {
     newStatus = 'SUCCESS';
   } else if (isFailed) {
     newStatus = 'FAILED';
@@ -272,7 +286,9 @@ const handleWebhook = async (webhookData) => {
     data: {
       status: newStatus,
       moolreSessionId: data.id?.toString() || transaction.moolreSessionId,
-      moolreMessage: data.gateway_response || transaction.moolreMessage
+      moolreMessage: amountMismatch
+        ? `Amount mismatch: expected GHS ${transaction.amount}, paid GHS ${paidAmountGhs}`
+        : data.gateway_response || transaction.moolreMessage
     }
   });
 
@@ -446,24 +462,38 @@ const verifyAndCreateOrder = async (reference, shopService) => {
       data: { status: 'SUCCESS' }
     });
 
-    // Create order
+    // Create order through the SAME atomic, idempotent path used by the
+    // webhook and verify endpoints. This guarantees one charge → one order,
+    // even if reconciliation races with an in-flight webhook/verify.
     if (existingTransaction.productId && existingTransaction.mobileNumber) {
       try {
-        const order = await shopService.createShopOrder(
+        const orderResult = await shopService.createShopOrderForTransaction(
+          reference,
           existingTransaction.productId,
-          existingTransaction.mobileNumber,
-          'Shop Customer'
+          existingTransaction.mobileNumber
         );
 
-        await linkTransactionToOrder(reference, order.id);
-        console.log('[Payment Reconciliation] Order created:', order.id);
+        if (orderResult.created) {
+          console.log('[Payment Reconciliation] Order created:', orderResult.orderId);
+          return {
+            success: true,
+            message: 'Payment verified and order created',
+            orderId: orderResult.orderId,
+            mobileNumber: existingTransaction.mobileNumber
+          };
+        }
 
-        return { 
-          success: true, 
-          message: 'Payment verified and order created',
-          orderId: order.id,
-          mobileNumber: existingTransaction.mobileNumber
-        };
+        if (orderResult.alreadyExists) {
+          return {
+            success: true,
+            message: 'Order already exists',
+            orderId: orderResult.orderId,
+            mobileNumber: existingTransaction.mobileNumber
+          };
+        }
+
+        await markOrderCreationAttempted(existingTransaction.id, false, orderResult.error);
+        return { success: false, error: orderResult.error || 'Order creation failed' };
       } catch (orderError) {
         console.error('[Payment Reconciliation] Order creation failed:', orderError);
         await markOrderCreationAttempted(existingTransaction.id, false, orderError.message);

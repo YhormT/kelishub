@@ -55,7 +55,9 @@ const TopUp = ({ isOpen, onClose, onSuccess }) => {
 
       if (response.data.success && response.data.paymentUrl) {
         setExternalRef(response.data.externalRef);
-        window.location.href = response.data.paymentUrl;
+        setPaymentStep('redirect');
+        // Open Paystack in a new tab so the user can return and confirm here
+        window.open(response.data.paymentUrl, '_blank');
       } else {
         setPaymentStep('amount');
         Swal.fire({
