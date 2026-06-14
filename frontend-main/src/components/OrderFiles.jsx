@@ -213,12 +213,14 @@ const OrderFiles = () => {
     }
 
     const isGmplSubmit = submitToGmpl && isMtnNetwork(network);
+    const batchSize = autoExportConfig?.maxOrdersPerCycle || 3;
+    const exportCount = Math.min(count, batchSize > 0 ? batchSize : count);
 
     const confirm = await Swal.fire({
       title: isGmplSubmit ? `Send ${network} to GMPL` : `Export ${network} Orders`,
       html: isGmplSubmit
-        ? `<p style="color:#94a3b8">Export <b style="color:#fff">${count}</b> pending ${network} order(s), create batch(es), and submit to <b style="color:#fff">GMPL</b>.</p><p style="color:#64748b;margin-top:8px;font-size:13px">Use <b>Export Excel</b> first if you need the spreadsheet downloaded.</p>`
-        : `<p style="color:#94a3b8">Export <b style="color:#fff">${count}</b> pending ${network} order(s).</p><p style="color:#94a3b8;margin-top:8px">Creates batch(es), sets orders to Processing, and downloads the Excel file. Does <b style="color:#fff">not</b> send to GMPL.</p>`,
+        ? `<p style="color:#94a3b8">Export up to <b style="color:#fff">${exportCount}</b> of <b style="color:#fff">${count}</b> pending ${network} order(s) into <b style="color:#fff">one batch</b> and submit to GMPL.</p><p style="color:#64748b;margin-top:8px;font-size:13px">Use <b>Export Excel</b> first if you need the spreadsheet downloaded.</p>`
+        : `<p style="color:#94a3b8">Export up to <b style="color:#fff">${exportCount}</b> of <b style="color:#fff">${count}</b> pending ${network} order(s) into <b style="color:#fff">one batch</b>.</p><p style="color:#94a3b8;margin-top:8px">Sets orders to Processing and downloads one Excel file. Does <b style="color:#fff">not</b> send to GMPL.</p>`,
       icon: 'question',
       showCancelButton: true,
       confirmButtonText: isGmplSubmit ? 'Send to GMPL' : 'Export & Download',
@@ -272,7 +274,7 @@ const OrderFiles = () => {
         if (gmplSubmitted === 'true') {
           Swal.fire({
             title: 'Sent to GMPL',
-            text: `${batchLabel}: ${count} ${network} item(s) submitted — one batch per order.`,
+            text: `${batchLabel}: up to ${exportCount} ${network} order(s) submitted in one batch.`,
             icon: 'success',
             background: '#1a1a2e',
             color: '#fff',
@@ -324,7 +326,7 @@ const OrderFiles = () => {
       } else {
         Swal.fire({
           title: 'Exported',
-          text: `${batchLabel}: ${count} ${network} item(s) — Excel downloaded. One batch per order.`,
+          text: `${batchLabel}: up to ${exportCount} ${network} order(s) — Excel downloaded in one batch.`,
           icon: 'success',
           background: '#1a1a2e',
           color: '#fff',
@@ -709,7 +711,7 @@ const OrderFiles = () => {
             <p className="text-dark-400 text-xs mt-1">
               Pending MTN orders are exported as <b className="text-white">one batch per purchaser order</b> every {Math.round(autoExportConfig.intervalMs / 60000)} min
               {autoExportConfig.maxOrdersPerCycle > 0 ? (
-                <> — up to <b className="text-white">{autoExportConfig.maxOrdersPerCycle}</b> orders per cycle (oldest first). The next cycle sends more without waiting for GMPL to complete earlier batches.</>
+                <> — up to <b className="text-white">{autoExportConfig.maxOrdersPerCycle}</b> orders combined into <b className="text-white">one batch</b> per cycle (oldest first).</>
               ) : (
                 <> (all pending orders each cycle).</>
               )}
@@ -919,7 +921,11 @@ const OrderFiles = () => {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-dark-300 max-w-[180px] truncate" title={agentNames}>{agentNames}</td>
-                      <td className="px-4 py-3 text-center text-white">{batch.totalItems}</td>
+                      <td className="px-4 py-3 text-center text-white">
+                        {batch.orderCount ?? batch.orderIds?.length
+                          ? `${batch.orderCount ?? batch.orderIds.length} order${(batch.orderCount ?? batch.orderIds.length) !== 1 ? 's' : ''}`
+                          : batch.totalItems}
+                      </td>
                       <td className="px-4 py-3 text-right text-white font-medium">GHS {batch.totalPrice.toFixed(2)}</td>
                       <td className="px-4 py-3 text-center">
                         {statusBreakdown ? (

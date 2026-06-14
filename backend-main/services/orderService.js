@@ -1257,13 +1257,12 @@ const downloadOrdersForExcel = async ({
   return { items, updatedCount, totalItems: items.length };
 };
 
-const getResolvedAlertKeys = async (userId) => {
-  if (!userId) return [];
+/** Resolved alert keys are global — any admin resolve hides the alert for everyone. */
+const getResolvedAlertKeys = async () => {
   const rows = await prisma.fraudAlertResolution.findMany({
-    where: { userId: parseInt(userId) },
     select: { orderId: true, itemId: true },
   });
-  return rows.map((row) => `${row.orderId}-${row.itemId}`);
+  return [...new Set(rows.map((row) => `${row.orderId}-${row.itemId}`))];
 };
 
 const resolveAlert = async (userId, orderId, itemId) => {
@@ -1271,23 +1270,53 @@ const resolveAlert = async (userId, orderId, itemId) => {
     throw new Error("userId, orderId and itemId are required");
   }
 
-  await prisma.fraudAlertResolution.upsert({
-    where: {
-      userId_orderId_itemId: {
-        userId: parseInt(userId),
-        orderId: parseInt(orderId),
-        itemId: parseInt(itemId),
-      },
-    },
-    create: {
-      userId: parseInt(userId),
-      orderId: parseInt(orderId),
-      itemId: parseInt(itemId),
-    },
-    update: {},
-  });
+  const oid = parseInt(orderId, 10);
+  const iid = parseInt(itemId, 10);
+  const adminId = parseInt(userId, 10);
 
-  return { resolved: true, key: `${orderId}-${itemId}` };
+  // Storefront alerts are per-item; wallet alerts are order-level — resolve whole order.
+  const referral = await prisma.referralOrder.findUnique({
+    where: { orderId: oid },
+    select: { orderId: true },
+  });
+  const itemIdsToResolve = referral
+    ? [iid]
+    : (
+        await prisma.orderItem.findMany({
+          where: { orderId: oid },
+          select: { id: true },
+        })
+      ).map((i) => i.id);
+
+  if (itemIdsToResolve.length === 0) itemIdsToResolve.push(iid);
+
+  for (const resolvedItemId of itemIdsToResolve) {
+    await prisma.fraudAlertResolution.upsert({
+      where: {
+        userId_orderId_itemId: {
+          userId: adminId,
+          orderId: oid,
+          itemId: resolvedItemId,
+        },
+      },
+      create: {
+        userId: adminId,
+        orderId: oid,
+        itemId: resolvedItemId,
+      },
+      update: {},
+    });
+  }
+
+  return {
+    resolved: true,
+    keys: itemIdsToResolve.map((id) => `${oid}-${id}`),
+  };
+};
+
+const filterActiveFraudAlerts = (alerts, resolvedIds) => {
+  const resolved = new Set(resolvedIds);
+  return alerts.filter((a) => !resolved.has(`${a.orderId}-${a.itemId}`));
 };
 
 const getOrderTrackerData = async (filters = {}) => {
@@ -1337,7 +1366,7 @@ const getOrderTrackerData = async (filters = {}) => {
     orderItemFilter.productId = parseInt(productId);
   }
 
-  const resolvedIds = await getResolvedAlertKeys(userId);
+  const resolvedIds = await getResolvedAlertKeys();
 
   const orderItems = await prisma.orderItem.findMany({
     where: orderItemFilter,
@@ -1369,7 +1398,6 @@ const getOrderTrackerData = async (filters = {}) => {
           where: {
             reference: { in: references },
             type: "ORDER",
-            amount: { lt: 0 },
           },
           select: {
             reference: true,
@@ -1377,16 +1405,36 @@ const getOrderTrackerData = async (filters = {}) => {
             balance: true,
             amount: true,
           },
+          orderBy: { createdAt: "desc" },
         })
       : [];
 
-  const txMap = {};
+  const pickBestTx = (txList) => {
+    const debits = txList.filter((t) => t.amount < 0);
+    const pool = debits.length > 0 ? debits : txList;
+    return pool.reduce((best, tx) => {
+      if (!best) return tx;
+      const bestAudit =
+        best.previousBalance != null && best.balance != null ? 1 : 0;
+      const txAudit =
+        tx.previousBalance != null && tx.balance != null ? 1 : 0;
+      if (txAudit > bestAudit) return tx;
+      if (txAudit === bestAudit && Math.abs(tx.amount) > Math.abs(best.amount || 0)) {
+        return tx;
+      }
+      return best;
+    }, null);
+  };
+
+  const txsByRef = {};
   for (const tx of transactions) {
-    const ref = tx.reference;
-    const existing = txMap[ref];
-    if (!existing || Math.abs(tx.amount) > Math.abs(existing.amount || 0)) {
-      txMap[ref] = tx;
-    }
+    if (!txsByRef[tx.reference]) txsByRef[tx.reference] = [];
+    txsByRef[tx.reference].push(tx);
+  }
+
+  const txMap = {};
+  for (const [ref, txList] of Object.entries(txsByRef)) {
+    txMap[ref] = pickBestTx(txList);
   }
 
   const hasBalanceAudit = (tx) =>
@@ -1499,21 +1547,47 @@ const getOrderTrackerData = async (filters = {}) => {
           reason: `Storefront order - payment not verified (${referral.paymentStatus})`,
         });
       }
-    } else if (hasBalanceAudit(tx)) {
-      // Only flag wallet orders when before/after balances are recorded.
-      // Deduction is per order (not per item); flag once per order.
-      if (
-        price > 0 &&
-        Math.abs(tx.previousBalance - tx.balance) < 0.01 &&
-        !flaggedWalletOrders.has(item.orderId)
-      ) {
-        flaggedWalletOrders.add(item.orderId);
-        fraudAlerts.push({ ...row, reason: "Balance unchanged after order" });
+    } else {
+      // Wallet-based agent order — one alert per order for order-level issues
+      const orderFlagKey = `order-${item.orderId}`;
+
+      if (!tx) {
+        if (!flaggedWalletOrders.has(orderFlagKey)) {
+          flaggedWalletOrders.add(orderFlagKey);
+          fraudAlerts.push({
+            ...row,
+            reason: "No transaction record found for order",
+          });
+        }
+      } else if (hasBalanceAudit(tx)) {
+        if (
+          price > 0 &&
+          Math.abs(tx.previousBalance - tx.balance) < 0.01 &&
+          !flaggedWalletOrders.has(orderFlagKey)
+        ) {
+          flaggedWalletOrders.add(orderFlagKey);
+          fraudAlerts.push({ ...row, reason: "Balance unchanged after order" });
+        }
+      } else if (!flaggedWalletOrders.has(orderFlagKey)) {
+        flaggedWalletOrders.add(orderFlagKey);
+        fraudAlerts.push({
+          ...row,
+          reason: "Wallet debit missing balance before/after",
+        });
       }
     }
   }
 
-  return { tableData, networkSummary, fraudAlerts, resolvedIds };
+  const activeFraudAlerts = filterActiveFraudAlerts(fraudAlerts, resolvedIds);
+
+  return {
+    tableData,
+    networkSummary,
+    fraudAlerts: activeFraudAlerts,
+    allFraudAlerts: fraudAlerts,
+    resolvedIds,
+    activeAlertCount: activeFraudAlerts.length,
+  };
 };
 
 const cancelOrderItem = async (userId, orderItemId) => {
