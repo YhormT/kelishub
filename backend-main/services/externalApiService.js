@@ -5,7 +5,6 @@ const fs = require('fs');
 const { createTransaction } = require('./transactionService');
 const productService = require('./productService');
 const { parseSimplifiedExcelRows } = require('./orderExcelParser');
-const gmplService = require('./gmplService');
 const { isGmplNetwork } = require('../utils/gmplNetwork');
 const { summarizeOrderItems } = require('../utils/orderEvents');
 
@@ -322,7 +321,15 @@ const createExternalFileOrder = async (partnerId, filePath, networkProvider) => 
 
   let gmplResult = null;
   try {
-    gmplResult = await gmplService.submitAgentOrderFile(filePath, network);
+    const { submitRowsToGmpl } = require('../utils/gmplOrderExport');
+    const crypto = require('crypto');
+    const rows = productsToAdd.map((item) => ({
+      phone: item.phoneNumber,
+      bundle: item.product.description || item.product.name,
+    }));
+    gmplResult = await submitRowsToGmpl(rows, network, {
+      idempotencyKey: `kellishub-ext-${partnerId}-${crypto.randomUUID()}`,
+    });
   } catch (gmplErr) {
     throw new Error(gmplErr.message || 'Failed to submit order to data provider');
   }

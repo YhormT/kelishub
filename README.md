@@ -69,7 +69,7 @@ CHAT_ENCRYPTION_KEY="your-32-char-key-or-same-as-jwt"
 PAYSTACK_SECRET_KEY="sk_test_..."
 PAYSTACK_CALLBACK_URL="http://localhost:5173/shop"
 FRONTEND_URL="http://localhost:5173"
-GMPL_API_URL="https://api.gmpl.com"
+GMPL_API_URL="https://api.getmorepaylessdatahouse.net/api/v1"
 GMPL_API_KEY="your-gmpl-secret"
 PORT=5000
 NODE_ENV=development
@@ -138,27 +138,64 @@ Agent spendable balance is `User.loanBalance`. Cart submit, external API orders,
 
 API keys are tied to a specific agent (`ExternalApiKey.agentId`). Orders without sufficient `loanBalance` return HTTP **402**.
 
-### GMPL supplier API (upstream)
+### GMPL supplier API (Get More Pay Less Data House)
 
-Kellishub forwards Excel orders to GMPL via `gmplService.js`:
+Kellishub submits orders via the **Agent API v1** (`gmplService.js` → `POST /agent/orders/bulk`):
 
-- **External API:** `POST /api/external/orders/file` (agent API key + wallet debit)
-- **Admin → Order Files:** export pending by network (auto-submit), **Send to GMPL** on a batch, or direct **Submit Excel to GMPL**
+- **Admin → Order Files:** Export Excel (download) or **Send to GMPL** (JSON bulk, up to 3 orders per batch)
+- **External API:** `POST /api/external/orders/file` (after local wallet debit)
 
-| GMPL endpoint | `POST https://api.gmpl.com/api/orders/agents/new` |
-| Auth | `Authorization: Bearer <secret>` **or** `x-clerk-api-key: <secret>` (both sent) |
-| Body | `multipart/form-data`: `orderFile` (`.xlsx`), `network_provider` (`mtn`, `telecel`, `airteltigo`, …) |
+| Setting | Value |
+|---------|--------|
+| Base URL | `https://api.getmorepaylessdatahouse.net/api/v1` |
+| Auth | Header `x-api-key: ak_live_…` or `ak_test_…` |
+| Bulk submit | `POST /agent/orders/bulk` with `{ network, idempotencyKey, recipients[] }` |
+| Webhook | `POST https://your-api/order/gmpl/webhook` — events `purchase.success`, `purchase.failed` |
 
-Direct supplier test (replace secret; do not commit real keys):
+Test connectivity (replace with your live key):
 
 ```bash
-curl -X POST "https://api.gmpl.com/api/orders/agents/new" \
-  -H "Authorization: Bearer YOUR_GMPL_SECRET" \
-  -F "orderFile=@order.xlsx" \
-  -F "network_provider=mtn"
+curl "https://api.getmorepaylessdatahouse.net/api/v1/agent/me" \
+  -H "x-api-key: ak_live_YOUR_KEY"
 ```
 
-**Production:** In [Render](https://dashboard.render.com) → `kellishub-api` → **Environment** → set `GMPL_API_KEY` to your GMPL secret → **Save & deploy**. Never put the live key in git or `render.yaml`.
+**Production:** Set `GMPL_API_URL` and `GMPL_API_KEY` on Render → `kellishub-api` → **Environment** (see [Fix GMPL URL on Render](#fix-gmpl-url-on-render) below). Never commit live keys to git.
+
+### Fix GMPL URL on Render
+
+The old value `https://api.gmpl.com` does not exist (DNS `ENOTFOUND`). Use the supplier’s Agent API base URL instead.
+
+1. Open [Render Dashboard](https://dashboard.render.com) and select the **`kellishub-api`** web service (not the frontend or database).
+2. Go to **Environment** in the left sidebar.
+3. Find **`GMPL_API_URL`**:
+   - If it exists and shows `https://api.gmpl.com` (or anything other than the URL below), click **Edit** and replace it with:
+   ```
+   https://api.getmorepaylessdatahouse.net/api/v1
+   ```
+   - If it is missing, click **Add Environment Variable** → Key: `GMPL_API_URL`, Value: `https://api.getmorepaylessdatahouse.net/api/v1`.
+4. Find or add **`GMPL_API_KEY`**:
+   - Value: your GMPL key from the supplier (`ak_live_…` for real bulk orders; `ak_test_…` only for read-only checks like `/agent/me`).
+   - Mark as **Secret** if Render offers that option.
+5. *(Optional but recommended)* Add **`GMPL_WEBHOOK_SECRET`** if GMPL gave you a webhook signing secret — used to verify `X-Telecom-Signature` on `POST /order/gmpl/webhook`.
+6. Click **Save Changes**. Render will redeploy the API automatically (or click **Manual Deploy** → **Deploy latest commit** if you also pushed code changes).
+7. After deploy finishes, verify connectivity from your machine (replace the key):
+
+   ```bash
+   curl "https://api.getmorepaylessdatahouse.net/api/v1/agent/me" \
+     -H "x-api-key: ak_live_YOUR_KEY"
+   ```
+
+   You should get JSON with your agent account (not `ENOTFOUND` or 401).
+
+8. In Kellishub admin → **Order Files**, use **Send to GMPL** on a small test batch (up to 3 orders). The GMPL modal should show a supplier response instead of `getaddrinfo ENOTFOUND api.gmpl.com`.
+
+**Webhook URL to register with GMPL** (after API is live):
+
+```
+https://api.kellishub.com/order/gmpl/webhook
+```
+
+Events: `purchase.success`, `purchase.failed`.
 
 ### Other API groups
 
@@ -231,8 +268,8 @@ Public: `/` (landing), `/login`, `/shop`, `/store/:slug`.
 | `PAYSTACK_SECRET_KEY` | Yes | Paystack secret |
 | `PAYSTACK_CALLBACK_URL` | Yes | e.g. `https://kellishub.com/shop` |
 | `FRONTEND_URL` | Yes | e.g. `https://kellishub.com` |
-| `GMPL_API_URL` | Yes for file API | Default `https://api.gmpl.com` |
-| `GMPL_API_KEY` | Yes for file API | Supplier API secret (`sync: false` in Blueprint) |
+| `GMPL_API_URL` | Yes for GMPL | Default `https://api.getmorepaylessdatahouse.net/api/v1` |
+| `GMPL_API_KEY` | Yes for GMPL | `ak_live_…` or `ak_test_…` from GMPL (secret in Render) |
 | `NODE_ENV` | Yes | `production` on Render |
 | `PORT` | Auto on Render | Default `5000` locally |
 

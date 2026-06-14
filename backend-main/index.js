@@ -152,10 +152,13 @@ app.set('io', io);
 const isPaystackWebhookPath = (url) =>
   url === '/api/payment/webhook' || url === '/api/topup/webhook';
 
+const isGmplWebhookPath = (url) => url === '/order/gmpl/webhook';
+
 app.use(
   express.json({
     verify: (req, _res, buf) => {
-      if (isPaystackWebhookPath(req.originalUrl?.split('?')[0])) {
+      const path = req.originalUrl?.split('?')[0];
+      if (isPaystackWebhookPath(path) || isGmplWebhookPath(path)) {
         req.rawBody = buf;
       }
     },

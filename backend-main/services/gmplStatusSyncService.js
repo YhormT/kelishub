@@ -1,7 +1,6 @@
-const axios = require('axios');
 const prisma = require('../config/db');
 const orderBatchService = require('./orderBatchService');
-const { getGmplConfig } = require('./gmplService');
+const gmplService = require('./gmplService');
 const { isGmplNetwork } = require('../utils/gmplNetwork');
 const { emitPendingQueueChanged } = require('../utils/orderEvents');
 
@@ -25,6 +24,16 @@ const PROCESSING_STATUSES = new Set([
   'queued',
   'submitted',
   'active',
+  'received',
+]);
+
+const FAILED_STATUSES = new Set([
+  'failed',
+  'could_not_deliver',
+  'could-not-deliver',
+  'cancelled',
+  'canceled',
+  'refunded',
 ]);
 
 const normalizePhone = (phone) => {
@@ -37,7 +46,7 @@ const mapGmplStatus = (raw) => {
   const s = String(raw || '').toLowerCase().trim();
   if (COMPLETED_STATUSES.has(s)) return 'Completed';
   if (PROCESSING_STATUSES.has(s)) return 'Processing';
-  if (s === 'failed' || s === 'cancelled' || s === 'canceled') return 'Failed';
+  if (FAILED_STATUSES.has(s)) return 'Failed';
   return null;
 };
 
@@ -82,7 +91,7 @@ const applyLineUpdates = async (batch, lines) => {
   let updated = 0;
   for (const line of lines) {
     const targetStatus = mapGmplStatus(line.status);
-    if (!targetStatus || targetStatus === 'Failed') continue;
+    if (!targetStatus) continue;
 
     const phone = normalizePhone(line.phone || line.phoneNumber || line.msisdn);
     if (!phone) continue;
@@ -181,7 +190,11 @@ const applyFulfillmentUpdate = async (payload = {}) => {
       where: { id: batch.id },
       data: {
         gmplStatus: 'failed',
-        gmplError: payload.message || payload.error || 'GMPL reported failure',
+        gmplError:
+          payload.message ||
+          payload.error?.message ||
+          payload.error ||
+          'GMPL reported failure',
       },
     });
   }
@@ -194,34 +207,13 @@ const applyFulfillmentUpdate = async (payload = {}) => {
 };
 
 const fetchGmplRemoteStatus = async (gmplResponseId) => {
-  const { baseUrl, apiKey } = getGmplConfig();
-  if (!apiKey || !gmplResponseId) return null;
-
-  const id = encodeURIComponent(String(gmplResponseId));
-  const candidates = [
-    `${baseUrl}/api/orders/agents/${id}`,
-    `${baseUrl}/api/orders/agents/${id}/status`,
-  ];
-
-  for (const url of candidates) {
-    try {
-      const response = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'x-clerk-api-key': apiKey,
-        },
-        timeout: 30000,
-        validateStatus: (status) => status < 500,
-      });
-      if (response.status >= 200 && response.status < 300) {
-        return response.data;
-      }
-    } catch (_) {
-      /* try next candidate */
-    }
+  if (!process.env.GMPL_API_KEY || !gmplResponseId) return null;
+  try {
+    return await gmplService.getOrder(gmplResponseId);
+  } catch (err) {
+    console.error('[GMPL Status] getOrder failed:', err.message);
+    return null;
   }
-
-  return null;
 };
 
 const syncBatchFromGmpl = async (batch) => {
@@ -235,14 +227,12 @@ const syncBatchFromGmpl = async (batch) => {
   const status =
     remote.status ||
     remote.orderStatus ||
-    remote.state ||
-    remote.data?.status;
+    remote.state;
   const lines =
     remote.lines ||
     remote.items ||
     remote.orders ||
-    remote.data?.lines ||
-    remote.data?.items;
+    remote.recipients;
 
   return applyFulfillmentUpdate({
     batchId: batch.id,
@@ -328,22 +318,55 @@ const startGmplStatusSyncScheduler = () => {
   }, 60_000);
 };
 
-const verifyWebhookSecret = (req) => {
-  const expected = process.env.GMPL_WEBHOOK_SECRET;
-  if (!expected) return true;
+const handleGmplWebhookEvent = async (payload = {}) => {
+  const event = payload.event || payload.eventType || payload.type;
+  const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+
+  let status = data.status;
+  if (event === 'purchase.success') status = 'delivered';
+  if (event === 'purchase.failed') status = 'could_not_deliver';
+
+  const gmplOrderId = data.id || data.orderId;
+  const phone = data.phoneNumber || data.phone;
+
+  return applyFulfillmentUpdate({
+    gmplResponseId: gmplOrderId,
+    batchId: data.batchId || payload.batchId,
+    status,
+    lines: phone ? [{ phoneNumber: phone, status: status || event }] : [],
+    message: data.message || data.error?.message || payload.message,
+  });
+};
+
+const verifyWebhookSignature = (req) => {
+  const secret = process.env.GMPL_WEBHOOK_SECRET;
+  if (!secret) return true;
+
+  const signature =
+    req.headers['x-telecom-signature'] ||
+    req.headers['x-gmpl-webhook-secret'] ||
+    req.headers['x-webhook-secret'];
+
+  const rawBody = req.rawBody
+    ? req.rawBody.toString('utf8')
+    : JSON.stringify(req.body || {});
+
+  if (req.headers['x-telecom-signature']) {
+    return gmplService.verifyWebhookSignature(rawBody, signature, secret);
+  }
 
   const provided =
-    req.headers['x-gmpl-webhook-secret'] ||
-    req.headers['x-webhook-secret'] ||
+    signature ||
     (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-
-  return provided === expected;
+  return provided === secret;
 };
 
 module.exports = {
   applyFulfillmentUpdate,
+  handleGmplWebhookEvent,
   syncBatchFromGmpl,
   runGmplStatusSyncCycle,
   startGmplStatusSyncScheduler,
-  verifyWebhookSecret,
+  verifyWebhookSignature,
+  verifyWebhookSecret: verifyWebhookSignature,
 };
