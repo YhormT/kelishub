@@ -40,26 +40,36 @@ const getConfig = () => ({
   ),
 });
 
+// GMPL returns the canonical order id as `publicId` (e.g. ord_01KV…) — this is
+// what GET /agent/orders/:id and webhooks (data.order_id) use. The internal
+// `id` is a UUID the API does NOT accept (causes NOT_FOUND), so prefer publicId,
+// then referenceCode (webhook data.reference), before falling back to id.
+const pickGmplOrderId = (o) =>
+  o?.publicId ??
+  o?.referenceCode ??
+  o?.order_id ??
+  o?.orderId ??
+  o?.id ??
+  null;
+
 const extractGmplResponseId = (gmplResult) => {
   if (!gmplResult || typeof gmplResult !== 'object') return null;
   const r = gmplResult;
-  // GMPL bulk responses vary: a top-level batch/reference id, a nested data
-  // object, or an array of per-recipient orders. Try each known shape so the
-  // status poller (GET /agent/orders/:id) has an id to work with.
-  const id =
-    r.id ??
-    r.referenceCode ??
-    r.batchId ??
-    r.orderId ??
-    r.batch?.id ??
-    r.data?.id ??
-    r.data?.batchId ??
-    r.data?.referenceCode ??
-    (Array.isArray(r.orders) ? r.orders[0]?.id ?? r.orders[0]?.orderId : undefined) ??
-    (Array.isArray(r.recipients)
-      ? r.recipients[0]?.orderId ?? r.recipients[0]?.id
-      : undefined) ??
-    (Array.isArray(r.data) ? r.data[0]?.id ?? r.data[0]?.orderId : undefined);
+
+  // Single order object (bulk with 1 recipient returns a flat object).
+  let id = pickGmplOrderId(r);
+  if (id != null) return String(id);
+
+  // Array / wrapped shapes (multi-recipient bulk).
+  const arr =
+    (Array.isArray(r) && r) ||
+    (Array.isArray(r.orders) && r.orders) ||
+    (Array.isArray(r.recipients) && r.recipients) ||
+    (Array.isArray(r.data) && r.data) ||
+    null;
+  if (arr && arr.length) id = pickGmplOrderId(arr[0]);
+  else id = pickGmplOrderId(r.data) ?? pickGmplOrderId(r.batch);
+
   return id != null ? String(id) : null;
 };
 

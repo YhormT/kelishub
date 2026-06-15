@@ -116,7 +116,13 @@ const findBatchByPhones = async (phones = []) => {
   });
 };
 
-const findBatch = async ({ batchId, gmplResponseId, gmplOrderId, phones = [] }) => {
+const findBatch = async ({
+  batchId,
+  gmplResponseId,
+  gmplOrderId,
+  gmplIds = [],
+  phones = [],
+}) => {
   if (batchId) {
     return prisma.orderBatch.findUnique({
       where: { id: parseInt(batchId, 10) },
@@ -124,10 +130,14 @@ const findBatch = async ({ batchId, gmplResponseId, gmplOrderId, phones = [] }) 
     });
   }
 
-  const gmplId = gmplResponseId || gmplOrderId;
-  if (gmplId) {
+  // GMPL identifies orders by publicId (webhook data.order_id) or referenceCode
+  // (data.reference). Try every candidate against the stored gmplResponseId.
+  const ids = [gmplResponseId, gmplOrderId, ...gmplIds]
+    .filter(Boolean)
+    .map(String);
+  if (ids.length) {
     const byId = await prisma.orderBatch.findFirst({
-      where: { gmplResponseId: String(gmplId) },
+      where: { gmplResponseId: { in: ids } },
       include: BATCH_ITEMS_INCLUDE,
     });
     if (byId) return byId;
@@ -420,10 +430,22 @@ const handleGmplWebhookEvent = async (payload = {}) => {
   let status = data.status || EVENT_STATUS[event];
   if (event === 'order.partially_approved') status = undefined;
 
-  const gmplOrderId = data.id || data.orderId || data.batchId;
+  // GMPL webhook identifies the order via snake_case data.order_id (= publicId
+  // we stored) and data.reference (= referenceCode). Pass every candidate so
+  // findBatch can match regardless of which value was saved on the batch.
+  const candidateIds = [
+    data.order_id,
+    data.orderId,
+    data.publicId,
+    data.id,
+    data.reference,
+    data.referenceCode,
+    data.batchId,
+  ].filter(Boolean);
 
   return applyFulfillmentUpdate({
-    gmplResponseId: gmplOrderId,
+    gmplResponseId: candidateIds[0],
+    gmplIds: candidateIds,
     batchId: data.batchId || payload.batchId,
     status,
     lines,
