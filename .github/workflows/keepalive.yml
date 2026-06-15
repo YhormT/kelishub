@@ -1,0 +1,34 @@
+name: Keep API awake
+
+# Backup keep-alive for the free Render instance (UptimeRobot is the primary).
+# Render free instances spin down after ~15 min idle, which stops the in-process
+# GMPL auto-export sweep and status-sync timers. Pinging /health keeps it awake.
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub may delay scheduled runs under load, so this is a
+    # secondary safety net behind UptimeRobot's 5-minute checks.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        env:
+          # Override in repo Settings → Secrets and variables → Actions → Variables
+          # if your API host differs.
+          API_HEALTH_URL: ${{ vars.API_HEALTH_URL || 'https://api.kellishub.com/health' }}
+        run: |
+          for attempt in 1 2 3 4; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$API_HEALTH_URL" || echo "000")
+            if [ "$code" = "200" ]; then
+              echo "Health OK ($code) on attempt $attempt"
+              exit 0
+            fi
+            echo "Attempt $attempt got HTTP $code (instance may be cold-starting), retrying in 30s..."
+            sleep 30
+          done
+          echo "Health check failed after 4 attempts"
+          exit 1
