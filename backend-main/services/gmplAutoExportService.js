@@ -11,6 +11,7 @@ const { emitPendingQueueChanged } = require('../utils/orderEvents');
 const GMPL_AUTO_NETWORKS = [GMPL_NETWORK];
 
 let cycleRunning = false;
+let exportDebounceTimer = null;
 
 const getConfig = () => ({
   enabled: process.env.GMPL_AUTO_EXPORT === 'true',
@@ -22,7 +23,7 @@ const getConfig = () => ({
     1,
     parseInt(process.env.GMPL_MIN_PENDING_COUNT || '1', 10)
   ),
-  retryFailed: process.env.GMPL_AUTO_RETRY_FAILED !== 'false',
+  retryFailed: process.env.GMPL_AUTO_RETRY_FAILED === 'true',
   maxRetries: Math.max(
     1,
     parseInt(process.env.GMPL_AUTO_MAX_RETRIES || '3', 10)
@@ -414,16 +415,49 @@ const runAutoGmplCycle = async () => {
 
   try {
     const adminUserId = await getSystemAdminUserId();
-    const retries = await retryFailedBatches();
+    if (config.retryFailed) {
+      await retryFailedBatches();
+    } else {
+      await reconcileFulfilledFailedBatches();
+    }
     const exports = await autoExportPendingNetworks(adminUserId);
 
-    return { retries, exports };
+    return { exports };
   } catch (err) {
     console.error('[GMPL Auto] Cycle error:', err.message);
     return { error: err.message };
   } finally {
     cycleRunning = false;
   }
+};
+
+const scheduleNextExportIfPending = async () => {
+  const config = getConfig();
+  if (!config.enabled || !process.env.GMPL_API_KEY) return;
+
+  const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
+  const pendingOrders = orderCounts[GMPL_NETWORK]?.count || 0;
+  if (pendingOrders >= config.minPending) {
+    scheduleImmediateAutoExport();
+  }
+};
+
+const scheduleImmediateAutoExport = () => {
+  const config = getConfig();
+  if (!config.enabled || !process.env.GMPL_API_KEY) return;
+
+  if (exportDebounceTimer) {
+    clearTimeout(exportDebounceTimer);
+  }
+
+  exportDebounceTimer = setTimeout(() => {
+    exportDebounceTimer = null;
+    runAutoGmplCycle()
+      .then(() => scheduleNextExportIfPending())
+      .catch((err) => {
+        console.error('[GMPL Auto] Debounced export error:', err.message);
+      });
+  }, config.intervalMs);
 };
 
 const startAutoGmplScheduler = () => {
@@ -440,36 +474,23 @@ const startAutoGmplScheduler = () => {
   }
 
   console.log(
-    `[GMPL Auto] Scheduler started (every ${config.intervalMs / 1000}s, min pending: ${config.minPending}` +
+    `[GMPL Auto] Debounced export enabled (${config.intervalMs / 1000}s delay after new pending orders` +
       (config.maxOrdersPerCycle > 0
-        ? `, max ${config.maxOrdersPerCycle} order(s)/cycle (no wait for GMPL completion)`
-        : ', unlimited orders/cycle') +
+        ? `, max ${config.maxOrdersPerCycle} order(s)/run`
+        : ', unlimited orders/run') +
+      (config.retryFailed ? ', auto-retry on failure' : ', failed batches require manual retry') +
       ')'
   );
 
-  setInterval(() => {
-    runAutoGmplCycle().catch((err) => {
-      console.error('[GMPL Auto] Unhandled cycle error:', err.message);
-    });
-  }, config.intervalMs);
-
-  setTimeout(() => {
-    runAutoGmplCycle().catch((err) => {
-      console.error('[GMPL Auto] Initial cycle error:', err.message);
-    });
-  }, 5_000);
+  scheduleImmediateAutoExport();
 };
 
 /**
- * Export pending MTN orders on the scheduler (up to maxOrdersPerCycle per run).
- * Immediate per-order export is disabled so orders are sent in groups of 3.
+ * @deprecated Per-order immediate export — use debounced scheduleImmediateAutoExport instead.
  */
 const tryImmediateAutoExport = async () => {
-  return { skipped: true, reason: 'batched_scheduler_only' };
-};
-
-const scheduleImmediateAutoExport = () => {
-  // No-op: wait for scheduler to export up to GMPL_MAX_ORDERS_PER_CYCLE (default 3).
+  scheduleImmediateAutoExport();
+  return { scheduled: true, reason: 'debounced_export' };
 };
 
 const getAutoExportStatus = () => {

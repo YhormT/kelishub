@@ -53,7 +53,7 @@ services:
       - key: GMPL_MAX_ORDERS_PER_CYCLE
         value: "3"
       - key: GMPL_AUTO_RETRY_FAILED
-        value: "true"
+        value: "false"
       - key: GMPL_AUTO_MAX_RETRIES
         value: "3"
       - key: GMPL_STATUS_SYNC
