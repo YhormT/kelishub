@@ -86,11 +86,19 @@ const submitRowsToGmpl = async (rows, network, { idempotencyKey, batchId } = {})
     (batchId != null ? `kellishub-batch-${batchId}` : null) ||
     crypto.randomUUID();
 
-  return gmplService.placeBulkOrder({
+  const result = await gmplService.placeBulkOrder({
     network: networkToGmplApiNetwork(network),
     idempotencyKey: key,
     recipients,
   });
+
+  try {
+    console.log('[GMPL] bulk response shape:', JSON.stringify(result).slice(0, 800));
+  } catch (_) {
+    /* logging is best-effort */
+  }
+
+  return result;
 };
 
 const parseExcelFileToRows = (filePath) => {

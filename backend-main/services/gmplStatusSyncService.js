@@ -66,39 +66,78 @@ const mapGmplStatus = (raw) => {
   return null;
 };
 
-const findBatch = async ({ batchId, gmplResponseId, gmplOrderId }) => {
+const BATCH_ITEMS_INCLUDE = {
+  items: {
+    select: {
+      id: true,
+      status: true,
+      mobileNumber: true,
+      order: { select: { mobileNumber: true } },
+    },
+  },
+};
+
+// Build local/international variants of a phone so matching works regardless of
+// whether the number is stored as 0XXXXXXXXX or 233XXXXXXXXX.
+const phoneVariants = (phone) => {
+  const p = normalizePhone(phone);
+  if (!p) return [];
+  const variants = new Set([p]);
+  if (phone) variants.add(String(phone));
+  if (p.startsWith('0')) variants.add('233' + p.slice(1));
+  if (p.startsWith('233')) variants.add('0' + p.slice(3));
+  return [...variants].filter(Boolean);
+};
+
+// Bulk orders track each recipient under its own GMPL order id, so the id we
+// stored on the batch often won't match a webhook/poll. Fall back to locating
+// the batch by a recipient phone number among open MTN batches.
+const findBatchByPhones = async (phones = []) => {
+  const variants = [];
+  for (const ph of phones) variants.push(...phoneVariants(ph));
+  if (!variants.length) return null;
+
+  const item = await prisma.orderItem.findFirst({
+    where: {
+      OR: [
+        { mobileNumber: { in: variants } },
+        { order: { mobileNumber: { in: variants } } },
+      ],
+      batch: { network: 'MTN', status: { not: 'Completed' } },
+    },
+    orderBy: { id: 'desc' },
+    select: { batchId: true },
+  });
+
+  if (!item?.batchId) return null;
+  return prisma.orderBatch.findUnique({
+    where: { id: item.batchId },
+    include: BATCH_ITEMS_INCLUDE,
+  });
+};
+
+const findBatch = async ({ batchId, gmplResponseId, gmplOrderId, phones = [] }) => {
   if (batchId) {
     return prisma.orderBatch.findUnique({
       where: { id: parseInt(batchId, 10) },
-      include: {
-        items: {
-          select: {
-            id: true,
-            status: true,
-            mobileNumber: true,
-            order: { select: { mobileNumber: true } },
-          },
-        },
-      },
+      include: BATCH_ITEMS_INCLUDE,
     });
   }
 
   const gmplId = gmplResponseId || gmplOrderId;
-  if (!gmplId) return null;
+  if (gmplId) {
+    const byId = await prisma.orderBatch.findFirst({
+      where: { gmplResponseId: String(gmplId) },
+      include: BATCH_ITEMS_INCLUDE,
+    });
+    if (byId) return byId;
+  }
 
-  return prisma.orderBatch.findFirst({
-    where: { gmplResponseId: String(gmplId) },
-    include: {
-      items: {
-        select: {
-          id: true,
-          status: true,
-          mobileNumber: true,
-          order: { select: { mobileNumber: true } },
-        },
-      },
-    },
-  });
+  if (phones.length) {
+    return findBatchByPhones(phones);
+  }
+
+  return null;
 };
 
 const applyLineUpdates = async (batch, lines) => {
@@ -161,7 +200,10 @@ const refreshBatchOverallStatus = async (batchId) => {
 };
 
 const applyFulfillmentUpdate = async (payload = {}) => {
-  const batch = await findBatch(payload);
+  const phones = Array.isArray(payload.lines)
+    ? payload.lines.map((l) => l.phoneNumber || l.phone || l.msisdn).filter(Boolean)
+    : [];
+  const batch = await findBatch({ ...payload, phones });
   if (!batch) {
     throw new Error('Batch not found for GMPL status update');
   }
@@ -337,6 +379,16 @@ const startGmplStatusSyncScheduler = () => {
 const handleGmplWebhookEvent = async (payload = {}) => {
   const event = payload.event || payload.eventType || payload.type;
   const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
+
+  try {
+    console.log(
+      '[GMPL Webhook] event=%s payload=%s',
+      event,
+      JSON.stringify(payload).slice(0, 600)
+    );
+  } catch (_) {
+    /* logging is best-effort */
+  }
 
   if (event && IGNORED_EVENTS.has(event)) {
     return { ignored: true, event };
