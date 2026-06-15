@@ -15,8 +15,8 @@ let cycleRunning = false;
 const getConfig = () => ({
   enabled: process.env.GMPL_AUTO_EXPORT === 'true',
   intervalMs: Math.max(
-    60_000,
-    parseInt(process.env.GMPL_AUTO_INTERVAL_MS || '300000', 10)
+    5_000,
+    parseInt(process.env.GMPL_AUTO_INTERVAL_MS || '5000', 10)
   ),
   minPending: Math.max(
     1,
@@ -457,7 +457,7 @@ const startAutoGmplScheduler = () => {
     runAutoGmplCycle().catch((err) => {
       console.error('[GMPL Auto] Initial cycle error:', err.message);
     });
-  }, 45_000);
+  }, 5_000);
 };
 
 /**

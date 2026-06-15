@@ -47,7 +47,7 @@ services:
       - key: GMPL_AUTO_EXPORT
         value: "true"
       - key: GMPL_AUTO_INTERVAL_MS
-        value: "300000"
+        value: "5000"
       - key: GMPL_MIN_PENDING_COUNT
         value: "1"
       - key: GMPL_MAX_ORDERS_PER_CYCLE
