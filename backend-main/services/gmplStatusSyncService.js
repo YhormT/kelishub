@@ -14,6 +14,7 @@ const COMPLETED_STATUSES = new Set([
   'fulfilled',
   'delivered',
   'done',
+  'approved',
 ]);
 
 const PROCESSING_STATUSES = new Set([
@@ -34,7 +35,22 @@ const FAILED_STATUSES = new Set([
   'cancelled',
   'canceled',
   'refunded',
+  'rejected',
 ]);
+
+// Maps a GMPL webhook event name to the order status it represents when the
+// payload itself carries no explicit status. order.partially_approved is left
+// out on purpose — it must be resolved per-recipient from the payload lines.
+const EVENT_STATUS = {
+  'purchase.success': 'delivered',
+  'order.approved': 'approved',
+  'purchase.failed': 'could_not_deliver',
+  'order.rejected': 'rejected',
+  'order.received': 'received',
+};
+
+// Events that carry no order outcome — acknowledge and ignore.
+const IGNORED_EVENTS = new Set(['wallet.updated']);
 
 const normalizePhone = (phone) => {
   let p = String(phone || '').replace(/\D/g, '');
@@ -322,18 +338,43 @@ const handleGmplWebhookEvent = async (payload = {}) => {
   const event = payload.event || payload.eventType || payload.type;
   const data = payload.data && typeof payload.data === 'object' ? payload.data : payload;
 
-  let status = data.status;
-  if (event === 'purchase.success') status = 'delivered';
-  if (event === 'purchase.failed') status = 'could_not_deliver';
+  if (event && IGNORED_EVENTS.has(event)) {
+    return { ignored: true, event };
+  }
 
-  const gmplOrderId = data.id || data.orderId;
-  const phone = data.phoneNumber || data.phone;
+  // Per-recipient outcomes (e.g. order.partially_approved) may arrive as an
+  // array under recipients / orders / lines. Map each to a phone + status.
+  const recipientsArray =
+    (Array.isArray(data.recipients) && data.recipients) ||
+    (Array.isArray(data.orders) && data.orders) ||
+    (Array.isArray(data.lines) && data.lines) ||
+    null;
+
+  let lines = [];
+  if (recipientsArray) {
+    lines = recipientsArray
+      .map((r) => ({
+        phoneNumber: r.phoneNumber || r.phone || r.msisdn,
+        status: r.status || EVENT_STATUS[event] || event,
+      }))
+      .filter((l) => l.phoneNumber);
+  } else {
+    const phone = data.phoneNumber || data.phone;
+    const lineStatus = data.status || EVENT_STATUS[event] || event;
+    if (phone) lines = [{ phoneNumber: phone, status: lineStatus }];
+  }
+
+  // Overall batch status — skip for partial approval so it resolves per-recipient.
+  let status = data.status || EVENT_STATUS[event];
+  if (event === 'order.partially_approved') status = undefined;
+
+  const gmplOrderId = data.id || data.orderId || data.batchId;
 
   return applyFulfillmentUpdate({
     gmplResponseId: gmplOrderId,
     batchId: data.batchId || payload.batchId,
     status,
-    lines: phone ? [{ phoneNumber: phone, status: status || event }] : [],
+    lines,
     message: data.message || data.error?.message || payload.message,
   });
 };

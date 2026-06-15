@@ -21,16 +21,23 @@ const summarizeOrderItems = (items = []) => {
  * Notify admin UIs that the pending export queue changed (new order, export, etc.)
  */
 const emitPendingQueueChanged = (payload = {}) => {
+  // Trigger GMPL auto-export independently of socket availability so a missing
+  // or not-yet-ready io connection never prevents pending orders from exporting.
+  if (payload.orderId && payload.type !== 'exported') {
+    try {
+      const { scheduleImmediateAutoExport } = require('../services/gmplAutoExportService');
+      scheduleImmediateAutoExport(payload);
+    } catch (e) {
+      /* auto-export scheduling is best-effort */
+    }
+  }
+
   try {
     const { io } = require('../index');
     if (!io) return;
     io.emit('order-pending-changed', payload);
     if (payload.orderId) {
       io.emit('new-order', payload);
-    }
-    if (payload.orderId && payload.type !== 'exported') {
-      const { scheduleImmediateAutoExport } = require('../services/gmplAutoExportService');
-      scheduleImmediateAutoExport(payload);
     }
   } catch (e) {
     /* socket emit is best-effort */

@@ -33,15 +33,33 @@ const getConfig = () => ({
     0,
     parseInt(process.env.GMPL_MAX_ORDERS_PER_CYCLE || '3', 10)
   ),
+  /** Safety-net sweep: re-check for stranded pending orders even with no new-order events. */
+  sweepMs: Math.max(
+    15_000,
+    parseInt(process.env.GMPL_AUTO_SWEEP_MS || '60000', 10)
+  ),
 });
 
 const extractGmplResponseId = (gmplResult) => {
   if (!gmplResult || typeof gmplResult !== 'object') return null;
+  const r = gmplResult;
+  // GMPL bulk responses vary: a top-level batch/reference id, a nested data
+  // object, or an array of per-recipient orders. Try each known shape so the
+  // status poller (GET /agent/orders/:id) has an id to work with.
   const id =
-    gmplResult.id ??
-    gmplResult.referenceCode ??
-    gmplResult.batchId ??
-    gmplResult.orderId;
+    r.id ??
+    r.referenceCode ??
+    r.batchId ??
+    r.orderId ??
+    r.batch?.id ??
+    r.data?.id ??
+    r.data?.batchId ??
+    r.data?.referenceCode ??
+    (Array.isArray(r.orders) ? r.orders[0]?.id ?? r.orders[0]?.orderId : undefined) ??
+    (Array.isArray(r.recipients)
+      ? r.recipients[0]?.orderId ?? r.recipients[0]?.id
+      : undefined) ??
+    (Array.isArray(r.data) ? r.data[0]?.id ?? r.data[0]?.orderId : undefined);
   return id != null ? String(id) : null;
 };
 
@@ -446,14 +464,24 @@ const scheduleImmediateAutoExport = () => {
   const config = getConfig();
   if (!config.enabled || !process.env.GMPL_API_KEY) return;
 
-  if (exportDebounceTimer) {
-    clearTimeout(exportDebounceTimer);
-  }
+  // Already waiting to export — keep the existing 5s window (debounce).
+  if (exportDebounceTimer) return;
 
   exportDebounceTimer = setTimeout(() => {
     exportDebounceTimer = null;
     runAutoGmplCycle()
-      .then(() => scheduleNextExportIfPending())
+      .then((result) => {
+        const exported = result?.exports?.filter((e) => e.batchId) || [];
+        if (exported.length) {
+          console.log(
+            `[GMPL Auto] Cycle exported ${exported.length} batch(es): ` +
+              exported
+                .map((e) => `#${e.batchId} (${e.gmplStatus || 'unknown'})`)
+                .join(', ')
+          );
+        }
+        return scheduleNextExportIfPending();
+      })
       .catch((err) => {
         console.error('[GMPL Auto] Debounced export error:', err.message);
       });
@@ -479,10 +507,19 @@ const startAutoGmplScheduler = () => {
         ? `, max ${config.maxOrdersPerCycle} order(s)/run`
         : ', unlimited orders/run') +
       (config.retryFailed ? ', auto-retry on failure' : ', failed batches require manual retry') +
-      ')'
+      `, safety sweep every ${config.sweepMs / 1000}s)`
   );
 
+  // Pick up any orders already pending at boot.
   scheduleImmediateAutoExport();
+
+  // Safety net: periodically re-check for stranded pending orders so a missed
+  // new-order event never leaves them unsent. Triggers the same 5s debounce.
+  setInterval(() => {
+    scheduleNextExportIfPending().catch((err) => {
+      console.error('[GMPL Auto] Safety sweep error:', err.message);
+    });
+  }, config.sweepMs);
 };
 
 /**
@@ -503,6 +540,7 @@ const getAutoExportStatus = () => {
     minPendingCount: config.minPending,
     minPendingOrders: config.minPending,
     maxOrdersPerCycle: config.maxOrdersPerCycle,
+    sweepMs: config.sweepMs,
     retryFailed: config.retryFailed,
     maxRetries: config.maxRetries,
     apiUrl: process.env.GMPL_API_URL || gmplService.DEFAULT_GMPL_API_URL,
