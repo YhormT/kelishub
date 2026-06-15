@@ -1095,7 +1095,14 @@ exports.getGmplAutoExportStatus = async (req, res) => {
 
 exports.handleGmplWebhook = async (req, res) => {
   try {
+    console.log(
+      "[handleGmplWebhook] received event=%s sigHeader=%s",
+      req.body?.event || req.body?.type || "unknown",
+      req.headers["x-telecom-signature"] ? "yes" : "no"
+    );
+
     if (!gmplStatusSyncService.verifyWebhookSignature(req)) {
+      console.warn("[handleGmplWebhook] signature verification FAILED (401)");
       return res.status(401).json({ success: false, message: "Invalid webhook signature" });
     }
 
