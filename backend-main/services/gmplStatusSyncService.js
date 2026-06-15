@@ -426,6 +426,30 @@ const handleGmplWebhookEvent = async (payload = {}) => {
     if (phone) lines = [{ phoneNumber: phone, status: lineStatus }];
   }
 
+  // order.partially_approved carries no per-recipient breakdown in the webhook
+  // payload (only an order_id + overall amount). Per the GMPL spec, fetch the
+  // order detail (GET /agent/orders/:id) to learn which recipients were
+  // delivered vs refunded, then drive per-recipient line updates. Best-effort:
+  // if the lookup fails, we no-op and let the status poller reconcile later.
+  if (event === 'order.partially_approved' && lines.length === 0) {
+    const orderId = data.order_id || data.publicId || data.id || data.reference;
+    const remote = await fetchGmplRemoteStatus(orderId);
+    const recips =
+      (Array.isArray(remote?.recipients) && remote.recipients) ||
+      (Array.isArray(remote?.orders) && remote.orders) ||
+      (Array.isArray(remote?.lines) && remote.lines) ||
+      (Array.isArray(remote?.items) && remote.items) ||
+      null;
+    if (recips) {
+      lines = recips
+        .map((r) => ({
+          phoneNumber: r.phoneNumber || r.phone || r.msisdn,
+          status: r.status || r.state,
+        }))
+        .filter((l) => l.phoneNumber && l.status);
+    }
+  }
+
   // Overall batch status — skip for partial approval so it resolves per-recipient.
   let status = data.status || EVENT_STATUS[event];
   if (event === 'order.partially_approved') status = undefined;
