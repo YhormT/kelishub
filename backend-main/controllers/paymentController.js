@@ -385,13 +385,7 @@ const getAllTransactions = async (req, res) => {
 // Reconcile orphaned payments - process successful payments without orders
 const reconcilePayments = async (req, res) => {
   try {
-    console.log("[Payment Reconciliation] Starting reconciliation...");
-
-    const orphanedPayments =
-      await paymentService.getOrphanedSuccessfulPayments();
-    console.log(
-      `[Payment Reconciliation] Found ${orphanedPayments.length} orphaned payments`,
-    );
+    console.log("[Payment Reconciliation] Starting manual reconciliation...");
 
     const results = {
       processed: 0,
@@ -400,53 +394,80 @@ const reconcilePayments = async (req, res) => {
       details: [],
     };
 
-    for (const payment of orphanedPayments) {
-      try {
-        const result = await paymentService.verifyAndCreateOrder(
-          payment.externalRef,
-          shopService,
-        );
-        results.processed++;
+    // Process in batches until none left (cap total to avoid request timeout).
+    const MAX_TOTAL = 300;
+    for (;;) {
+      const orphanedPayments =
+        await paymentService.getOrphanedSuccessfulPayments({
+          includeFailedRetries: true,
+          limit: 50,
+        });
+      if (!orphanedPayments.length) break;
+      console.log(
+        `[Payment Reconciliation] Batch of ${orphanedPayments.length} orphaned payment(s)`,
+      );
 
-        if (result.success && result.orderId) {
-          results.ordersCreated++;
-          results.details.push({
-            reference: payment.externalRef,
-            status: "success",
-            orderId: result.orderId,
-          });
-        } else if (
-          result.success &&
-          result.message === "Order already exists"
-        ) {
-          results.details.push({
-            reference: payment.externalRef,
-            status: "already_exists",
-            orderId: result.orderId,
-          });
-        } else {
+      for (const payment of orphanedPayments) {
+        if (results.processed >= MAX_TOTAL) break;
+        try {
+          const result = await paymentService.verifyAndCreateOrder(
+            payment.externalRef,
+            shopService,
+          );
+          results.processed++;
+
+          if (result.success && result.orderId) {
+            results.ordersCreated++;
+            results.details.push({
+              reference: payment.externalRef,
+              status: "success",
+              orderId: result.orderId,
+            });
+            try {
+              const order = await prisma.order.findUnique({
+                where: { id: result.orderId },
+                include: { items: true },
+              });
+              if (order) notifyPendingOrderCreated({ created: true, order });
+            } catch (_) {
+              /* GMPL notify is best-effort */
+            }
+          } else if (
+            result.success &&
+            result.message === "Order already exists"
+          ) {
+            results.details.push({
+              reference: payment.externalRef,
+              status: "already_exists",
+              orderId: result.orderId,
+            });
+          } else {
+            results.failed++;
+            results.details.push({
+              reference: payment.externalRef,
+              status: "failed",
+              error: result.error,
+            });
+          }
+        } catch (error) {
           results.failed++;
           results.details.push({
             reference: payment.externalRef,
-            status: "failed",
-            error: result.error,
+            status: "error",
+            error: error.message,
           });
         }
-      } catch (error) {
-        results.failed++;
-        results.details.push({
-          reference: payment.externalRef,
-          status: "error",
-          error: error.message,
-        });
       }
+
+      if (results.processed >= MAX_TOTAL) break;
+      if (orphanedPayments.length < 50) break;
     }
 
     console.log("[Payment Reconciliation] Complete:", results);
 
     res.json({
       success: true,
-      message: `Reconciliation complete. Created ${results.ordersCreated} orders.`,
+      message: `Reconciliation complete. Created ${results.ordersCreated} order(s) from ${results.processed} payment(s).`,
       ...results,
     });
   } catch (error) {
@@ -462,7 +483,10 @@ const reconcilePayments = async (req, res) => {
 const getOrphanedPayments = async (req, res) => {
   try {
     const orphanedPayments =
-      await paymentService.getOrphanedSuccessfulPayments();
+      await paymentService.getOrphanedSuccessfulPayments({
+        includeFailedRetries: true,
+        limit: 200,
+      });
     res.json({
       success: true,
       count: orphanedPayments.length,

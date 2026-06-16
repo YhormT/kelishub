@@ -359,23 +359,32 @@ const linkTransactionToOrder = async (externalRef, orderId) => {
   });
 };
 
-// Payments that succeeded (or likely succeeded) on Paystack but have no linked order yet
-const getOrphanedSuccessfulPayments = async () => {
+// Payments that succeeded (or likely succeeded) on Paystack but have no linked order yet.
+// Manual reconcile may pass includeFailedRetries to retry rows previously marked
+// "Order creation failed" (e.g. after a deploy fix or transient DB error).
+const getOrphanedSuccessfulPayments = async ({
+  includeFailedRetries = false,
+  limit = 50,
+} = {}) => {
   const staleCutoff = new Date(Date.now() - 90 * 1000);
+
+  const successBranch = includeFailedRetries
+    ? { status: 'SUCCESS' }
+    : {
+        status: 'SUCCESS',
+        OR: [
+          { moolreMessage: null },
+          { moolreMessage: { equals: '' } },
+          { moolreMessage: { not: { startsWith: 'Order creation failed' } } },
+        ],
+      };
 
   return await prisma.paymentTransaction.findMany({
     where: {
       orderId: null,
       productId: { not: null },
       OR: [
-        {
-          status: 'SUCCESS',
-          OR: [
-            { moolreMessage: null },
-            { moolreMessage: { equals: '' } },
-            { moolreMessage: { not: { startsWith: 'Order creation failed' } } },
-          ],
-        },
+        successBranch,
         {
           status: { in: ['INITIALIZED', 'PENDING'] },
           createdAt: { lte: staleCutoff },
@@ -383,7 +392,7 @@ const getOrphanedSuccessfulPayments = async () => {
       ],
     },
     orderBy: { createdAt: 'desc' },
-    take: 50,
+    take: Math.min(Math.max(1, limit), 200),
   });
 };
 

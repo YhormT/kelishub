@@ -30,6 +30,8 @@ const TransactionalAdminModal = ({ isOpen, onClose }) => {
   const [shopServerStats, setShopServerStats] = useState({ totalOrders: 0, totalAmount: 0, totalGB: 0 });
   const [loading, setLoading] = useState(false);
   const [shopLoading, setShopLoading] = useState(false);
+  const [orphanedPaymentCount, setOrphanedPaymentCount] = useState(0);
+  const [reconciling, setReconciling] = useState(false);
   const [activeTab, setActiveTab] = useState('transactions');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -137,6 +139,60 @@ const TransactionalAdminModal = ({ isOpen, onClose }) => {
     }
   }, [shopFilters.startDate, shopFilters.endDate, startDate, endDate]);
 
+  const fetchOrphanedPaymentCount = useCallback(async () => {
+    try {
+      const res = await axios.get(`${BASE_URL}/api/payment/orphaned`, { headers: getAuthHeaders() });
+      if (res.data.success) {
+        setOrphanedPaymentCount(res.data.count ?? 0);
+      }
+    } catch (error) {
+      console.error('Error fetching orphaned payments:', error);
+    }
+  }, []);
+
+  const handleReconcileShopPayments = async () => {
+    const confirm = await Swal.fire({
+      title: 'Recover missing shop orders?',
+      html: `<p class="text-sm">This checks Paystack for successful payments that have no linked shop order and creates orders for them.</p><p class="text-sm mt-2"><b>${orphanedPaymentCount}</b> payment(s) currently waiting.</p>`,
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonText: 'Run reconcile',
+      cancelButtonText: 'Cancel',
+      background: '#1e293b',
+      color: '#f1f5f9',
+      confirmButtonColor: '#6366f1',
+    });
+    if (!confirm.isConfirmed) return;
+
+    setReconciling(true);
+    try {
+      const res = await axios.post(`${BASE_URL}/api/payment/reconcile`, {}, { headers: getAuthHeaders() });
+      const created = res.data.ordersCreated ?? 0;
+      const processed = res.data.processed ?? 0;
+      const failed = res.data.failed ?? 0;
+      await Swal.fire({
+        title: created > 0 ? 'Orders recovered' : 'Reconcile finished',
+        html: `<p>Processed: <b>${processed}</b></p><p>Orders created: <b>${created}</b></p>${failed ? `<p class="text-amber-400">Failed: ${failed}</p>` : ''}`,
+        icon: created > 0 ? 'success' : 'info',
+        background: '#1e293b',
+        color: '#f1f5f9',
+        confirmButtonColor: '#6366f1',
+      });
+      await fetchOrphanedPaymentCount();
+      await fetchShopOrders();
+    } catch (error) {
+      Swal.fire({
+        title: 'Reconcile failed',
+        text: error.response?.data?.message || error.message,
+        icon: 'error',
+        background: '#1e293b',
+        color: '#f1f5f9',
+      });
+    } finally {
+      setReconciling(false);
+    }
+  };
+
   const fetchReferralOrders = useCallback(async () => {
     setReferralLoading(true);
     try {
@@ -202,8 +258,11 @@ const TransactionalAdminModal = ({ isOpen, onClose }) => {
   }, [isOpen, fetchTransactions, fetchOverview]);
 
   useEffect(() => {
-    if (isOpen && activeTab === 'shop') fetchShopOrders();
-  }, [isOpen, activeTab, fetchShopOrders]);
+    if (isOpen && activeTab === 'shop') {
+      fetchShopOrders();
+      fetchOrphanedPaymentCount();
+    }
+  }, [isOpen, activeTab, fetchShopOrders, fetchOrphanedPaymentCount]);
 
   useEffect(() => {
     if (isOpen && activeTab === 'referrals') fetchReferralOrders();
@@ -622,7 +681,25 @@ const TransactionalAdminModal = ({ isOpen, onClose }) => {
               ) : activeTab === 'shop' ? (
                 /* Shop Orders Tab - With its own filters and stats */
                 <div>
-                  <h3 className="text-lg font-bold text-white mb-4">Shop Orders</h3>
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <h3 className="text-lg font-bold text-white">Shop Orders</h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {orphanedPaymentCount > 0 && (
+                        <span className="text-amber-400 text-xs font-medium px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                          {orphanedPaymentCount} paid, no order
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleReconcileShopPayments}
+                        disabled={reconciling}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50"
+                      >
+                        {reconciling ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                        Recover missing orders
+                      </button>
+                    </div>
+                  </div>
                   
                   {/* Shop-specific Filters */}
                   <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 mb-4">
