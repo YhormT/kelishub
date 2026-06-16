@@ -13,6 +13,27 @@ const GMPL_AUTO_NETWORKS = [GMPL_NETWORK];
 let cycleRunning = false;
 let exportDebounceTimer = null;
 
+const clearExportDebounceTimer = () => {
+  if (exportDebounceTimer) {
+    clearTimeout(exportDebounceTimer);
+    exportDebounceTimer = null;
+  }
+};
+
+const getMtnPendingOrderCount = async () => {
+  const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
+  return orderCounts[GMPL_NETWORK]?.count || 0;
+};
+
+/** 2+ waiting orders (or a full batch) export now; a lone order waits for debounce. */
+const shouldExportImmediately = (pendingOrders, config) => {
+  if (pendingOrders >= 2) return true;
+  if (config.maxOrdersPerCycle > 0 && pendingOrders >= config.maxOrdersPerCycle) {
+    return true;
+  }
+  return false;
+};
+
 const getConfig = () => ({
   enabled: process.env.GMPL_AUTO_EXPORT === 'true',
   intervalMs: Math.max(
@@ -473,35 +494,26 @@ const runExportCycleAndScheduleFollowUp = async () => {
     );
   }
 
-  const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
-  const pendingOrders = orderCounts[GMPL_NETWORK]?.count || 0;
+  const pendingOrders = await getMtnPendingOrderCount();
   if (pendingOrders >= config.minPending) {
-    // Backlog remains — send the next batch immediately (no extra 3 min wait).
-    setImmediate(() => {
-      runExportCycleAndScheduleFollowUp().catch((err) => {
-        console.error('[GMPL Auto] Follow-up export error:', err.message);
+    if (shouldExportImmediately(pendingOrders, config)) {
+      setImmediate(() => {
+        runExportCycleAndScheduleFollowUp().catch((err) => {
+          console.error('[GMPL Auto] Follow-up export error:', err.message);
+        });
       });
-    });
+    } else {
+      scheduleDebouncedSingleOrderExport(config);
+    }
   }
 };
 
-const scheduleNextExportIfPending = async () => {
-  const config = getConfig();
-  if (!config.enabled || !process.env.GMPL_API_KEY) return;
-
-  const orderCounts = await orderBatchService.getPendingOrderCountsByNetwork();
-  const pendingOrders = orderCounts[GMPL_NETWORK]?.count || 0;
-  if (pendingOrders >= config.minPending) {
-    scheduleImmediateAutoExport();
-  }
-};
-
-const scheduleImmediateAutoExport = () => {
-  const config = getConfig();
-  if (!config.enabled || !process.env.GMPL_API_KEY) return;
-
-  // Already waiting to export — keep the existing debounce window (default 3 min).
+const scheduleDebouncedSingleOrderExport = (config) => {
   if (exportDebounceTimer) return;
+
+  console.log(
+    `[GMPL Auto] 1 pending order — waiting ${config.intervalMs / 1000}s for more before export`,
+  );
 
   exportDebounceTimer = setTimeout(() => {
     exportDebounceTimer = null;
@@ -509,6 +521,41 @@ const scheduleImmediateAutoExport = () => {
       console.error('[GMPL Auto] Debounced export error:', err.message);
     });
   }, config.intervalMs);
+};
+
+const scheduleNextExportIfPending = async () => {
+  const config = getConfig();
+  if (!config.enabled || !process.env.GMPL_API_KEY) return;
+
+  const pendingOrders = await getMtnPendingOrderCount();
+  if (pendingOrders >= config.minPending) {
+    await scheduleAutoExport();
+  }
+};
+
+const scheduleAutoExport = async () => {
+  const config = getConfig();
+  if (!config.enabled || !process.env.GMPL_API_KEY) return;
+
+  const pendingOrders = await getMtnPendingOrderCount();
+  if (pendingOrders < config.minPending) return;
+
+  if (shouldExportImmediately(pendingOrders, config)) {
+    clearExportDebounceTimer();
+    runExportCycleAndScheduleFollowUp().catch((err) => {
+      console.error('[GMPL Auto] Immediate export error:', err.message);
+    });
+    return;
+  }
+
+  scheduleDebouncedSingleOrderExport(config);
+};
+
+/** @deprecated alias — use scheduleAutoExport */
+const scheduleImmediateAutoExport = () => {
+  scheduleAutoExport().catch((err) => {
+    console.error('[GMPL Auto] Schedule error:', err.message);
+  });
 };
 
 const startAutoGmplScheduler = () => {
@@ -525,17 +572,18 @@ const startAutoGmplScheduler = () => {
   }
 
   console.log(
-    `[GMPL Auto] Debounced export enabled (${config.intervalMs / 1000}s delay after new pending orders` +
+    `[GMPL Auto] Debounced export enabled (1 pending order waits ${config.intervalMs / 1000}s` +
+      ', 2+ export immediately' +
       (config.maxOrdersPerCycle > 0
         ? `, max ${config.maxOrdersPerCycle} order(s)/run`
         : ', unlimited orders/run') +
-      ', follow-up batches immediate when backlog remains' +
+      ', follow-up batches immediate when 2+ remain' +
       (config.retryFailed ? ', auto-retry on failure' : ', failed batches require manual retry') +
       `, safety sweep every ${config.sweepMs / 1000}s)`
   );
 
   // Pick up any orders already pending at boot.
-  scheduleImmediateAutoExport();
+  scheduleAutoExport().catch(() => {});
 
   // Safety net: periodically re-check for stranded pending orders so a missed
   // new-order event never leaves them unsent. Triggers the same debounce.
@@ -581,5 +629,6 @@ module.exports = {
   runAutoGmplCycle,
   startAutoGmplScheduler,
   tryImmediateAutoExport,
+  scheduleAutoExport,
   scheduleImmediateAutoExport,
 };
