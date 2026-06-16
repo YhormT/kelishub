@@ -167,14 +167,23 @@ const verifyTransactionId = async (req, res) => {
 
     res.status(200).json(result);
   } catch (error) {
-    console.error("Error in transaction ID top-up:", error);
-
     const statusCode =
       error.message.includes("Invalid") ||
       error.message.includes("not found") ||
       error.message.includes("already")
         ? 400
         : 500;
+
+    if (statusCode === 400) {
+      console.warn(
+        `[Top-up TXN] Rejected userId=${req.body?.userId} ref=${req.body?.referenceId}: ${error.message}`,
+      );
+    } else {
+      console.error(
+        `[Top-up TXN] Failed userId=${req.body?.userId}:`,
+        error.message,
+      );
+    }
 
     res.status(statusCode).json({
       success: false,

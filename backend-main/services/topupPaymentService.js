@@ -415,9 +415,29 @@ const verifyTransactionIdTopup = async (userId, referenceId, retries = 3) => {
     // Step 1: Find SMS message regardless of processed status
     const smsMessage = await smsService.findSmsByReferenceAny(cleanRef);
 
-    // Step 2: If not found at all → invalid ID
+    // Step 2: If not found at all → invalid ID (or SMS not ingested yet)
     if (!smsMessage) {
-      throw new Error("Invalid transaction ID. Please check the transaction ID and try again.");
+      const recentUnprocessed = await prisma.smsMessage.count({
+        where: {
+          isProcessed: false,
+          amount: { not: null },
+          createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        },
+      });
+
+      console.warn(
+        `[Top-up TXN] No SMS match for userId=${userId} ref=${cleanRef}` +
+          (recentUnprocessed > 0
+            ? ` (${recentUnprocessed} unprocessed payment SMS in last 5 min — may still be syncing)`
+            : ''),
+      );
+
+      const notFoundMsg =
+        recentUnprocessed > 0
+          ? 'Transaction ID not found yet. If you just sent payment, wait 1–2 minutes for the SMS to arrive, then try again.'
+          : 'Invalid transaction ID. Please check the transaction ID and try again.';
+
+      throw new Error(notFoundMsg);
     }
 
     // Step 3: If found but already processed → already used
@@ -529,11 +549,31 @@ const verifyTransactionIdTopup = async (userId, referenceId, retries = 3) => {
     }, { timeout: 15000 });
     // --- End Atomic Transaction ---
 
+    console.log(
+      `[Top-up TXN] Credited userId=${userId} GHS ${result.amount} ref=${cleanRef} topUpId=${result.topUpId}`,
+    );
+
     return result;
 
   } catch (error) {
-    console.error(`Error in transaction ID top-up (attempt ${4 - retries}):`, error);
-    if (retries > 0 && !error.message.includes("Invalid") && !error.message.includes("already")) {
+    const knownClientError =
+      error.message.includes('Invalid') ||
+      error.message.includes('not found yet') ||
+      error.message.includes('already been used') ||
+      error.message.includes('Amount not found') ||
+      error.message.includes('User not found');
+
+    if (!knownClientError) {
+      console.error(
+        `[Top-up TXN] Error userId=${userId} ref=${String(referenceId).trim()} (attempt ${4 - retries}):`,
+        error.message,
+      );
+    }
+
+    if (
+      retries > 0 &&
+      !knownClientError
+    ) {
       // Exponential backoff: wait for 100ms, 200ms, 400ms
       await new Promise((res) => setTimeout(res, (4 - retries) * 100));
       return verifyTransactionIdTopup(userId, referenceId, retries - 1);
