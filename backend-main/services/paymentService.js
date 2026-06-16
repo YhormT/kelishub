@@ -364,6 +364,7 @@ const linkTransactionToOrder = async (externalRef, orderId) => {
 // "Order creation failed" (e.g. after a deploy fix or transient DB error).
 const getOrphanedSuccessfulPayments = async ({
   includeFailedRetries = false,
+  successOnly = false,
   limit = 50,
 } = {}) => {
   const staleCutoff = new Date(Date.now() - 90 * 1000);
@@ -379,21 +380,34 @@ const getOrphanedSuccessfulPayments = async ({
         ],
       };
 
-  return await prisma.paymentTransaction.findMany({
-    where: {
-      orderId: null,
-      productId: { not: null },
-      OR: [
-        successBranch,
-        {
-          status: { in: ['INITIALIZED', 'PENDING'] },
-          createdAt: { lte: staleCutoff },
-        },
-      ],
-    },
-    orderBy: { createdAt: 'desc' },
-    take: Math.min(Math.max(1, limit), 200),
+  const cap = Math.min(Math.max(1, limit), 200);
+  const baseWhere = {
+    orderId: null,
+    productId: { not: null },
+  };
+
+  const paidOrphans = await prisma.paymentTransaction.findMany({
+    where: { ...baseWhere, ...successBranch },
+    orderBy: { createdAt: 'asc' },
+    take: cap,
   });
+
+  if (successOnly || paidOrphans.length >= cap) {
+    return paidOrphans;
+  }
+
+  const staleOrphans = await prisma.paymentTransaction.findMany({
+    where: {
+      ...baseWhere,
+      status: { in: ['INITIALIZED', 'PENDING'] },
+      createdAt: { lte: staleCutoff },
+      id: { notIn: paidOrphans.map((p) => p.id) },
+    },
+    orderBy: { createdAt: 'asc' },
+    take: cap - paidOrphans.length,
+  });
+
+  return [...paidOrphans, ...staleOrphans];
 };
 
 // Mark transaction as having order creation attempted
@@ -515,12 +529,24 @@ const verifyAndCreateOrder = async (reference, shopService) => {
     }
 
     if (!isSuccess) {
-      // Update transaction status
+      const paystackStatus = paymentData?.status;
+      const terminalFailure =
+        paystackStatus === 'failed' || paystackStatus === 'abandoned';
+
       await prisma.paymentTransaction.update({
         where: { id: existingTransaction.id },
-        data: { status: paymentData?.status === 'failed' ? 'FAILED' : existingTransaction.status }
+        data: {
+          status: terminalFailure ? 'FAILED' : existingTransaction.status,
+          moolreMessage: terminalFailure
+            ? `Payment ${paystackStatus}`
+            : existingTransaction.moolreMessage,
+        },
       });
-      return { success: false, error: 'Payment not successful', status: paymentData?.status };
+      return {
+        success: false,
+        error: 'Payment not successful',
+        status: paystackStatus,
+      };
     }
 
     // Payment is successful - update status and create order
@@ -552,6 +578,46 @@ const verifyAndCreateOrder = async (reference, shopService) => {
   }
 };
 
+// Close out abandoned checkout attempts (Paystack never completed). Runs separately
+// from order recovery so failed checkouts don't flood reconcile logs.
+const cleanupStalePaymentAttempts = async (shopService, { limit = 30 } = {}) => {
+  const staleCutoff = new Date(Date.now() - 5 * 60 * 1000);
+
+  const stale = await prisma.paymentTransaction.findMany({
+    where: {
+      orderId: null,
+      productId: { not: null },
+      status: { in: ['INITIALIZED', 'PENDING'] },
+      createdAt: { lte: staleCutoff },
+    },
+    orderBy: { createdAt: 'asc' },
+    take: Math.min(Math.max(1, limit), 100),
+    select: { externalRef: true },
+  });
+
+  if (stale.length === 0) return { checked: 0, cleared: 0, recovered: 0 };
+
+  let cleared = 0;
+  let recovered = 0;
+
+  for (const { externalRef } of stale) {
+    const result = await verifyAndCreateOrder(externalRef, shopService);
+    if (result.success && result.orderId) {
+      recovered++;
+    } else if (result.status === 'failed' || result.status === 'abandoned') {
+      cleared++;
+    }
+  }
+
+  if (cleared > 0 || recovered > 0) {
+    console.log(
+      `[Payment Cleanup] Checked ${stale.length} stale checkout(s): ${recovered} recovered, ${cleared} marked failed`,
+    );
+  }
+
+  return { checked: stale.length, cleared, recovered };
+};
+
 module.exports = {
   initializePayment,
   verifyPayment,
@@ -560,5 +626,6 @@ module.exports = {
   getAllPaymentTransactions,
   linkTransactionToOrder,
   getOrphanedSuccessfulPayments,
-  verifyAndCreateOrder
+  verifyAndCreateOrder,
+  cleanupStalePaymentAttempts,
 };

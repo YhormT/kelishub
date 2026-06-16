@@ -279,6 +279,9 @@ const fetchGmplRemoteStatus = async (gmplResponseId) => {
   try {
     return await gmplService.getOrder(gmplResponseId);
   } catch (err) {
+    if (String(err.message).includes('NOT_FOUND')) {
+      return { notFound: true };
+    }
     console.error('[GMPL Status] getOrder failed:', err.message);
     return null;
   }
@@ -290,6 +293,20 @@ const syncBatchFromGmpl = async (batch) => {
   }
 
   const remote = await fetchGmplRemoteStatus(batch.gmplResponseId);
+  if (remote?.notFound) {
+    await prisma.orderBatch.update({
+      where: { id: batch.id },
+      data: {
+        gmplStatus: 'failed',
+        gmplError:
+          'GMPL order not found (stale or invalid gmplResponseId — rely on webhooks or re-export)',
+      },
+    });
+    console.warn(
+      `[GMPL Status] Batch #${batch.id}: order ${batch.gmplResponseId} not found — stopped polling`,
+    );
+    return { skipped: true, batchId: batch.id, reason: 'not_found' };
+  }
   if (!remote) return { skipped: true, batchId: batch.id, reason: 'no_remote_data' };
 
   const status =

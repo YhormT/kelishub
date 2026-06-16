@@ -442,14 +442,16 @@ const reconcilePayments = async (req, res) => {
       }
     }
 
-    console.log("[Payment Reconciliation] Complete:", results);
+    console.log(
+      `[Payment Reconciliation] Complete: ${results.ordersCreated} order(s) created, ${results.failed} failed, ${results.processed} processed`,
+    );
 
     res.json({
       success: true,
       message: `Created ${results.ordersCreated} shop order(s) from ${results.processed} payment(s). Run again if more remain.`,
       remainingHint:
         orphanedPayments.length >= 100
-          ? "More orphaned payments may remain — click Recover again."
+          ? "More orphaned payments may remain — call POST /api/payment/reconcile again."
           : undefined,
       ...results,
     });

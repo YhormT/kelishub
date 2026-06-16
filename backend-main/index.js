@@ -220,22 +220,60 @@ const shopService = require('./services/shopService');
 
 const reconcileOrphanedPayments = async () => {
   try {
-    const orphanedPayments = await paymentService.getOrphanedSuccessfulPayments();
-    
-    if (orphanedPayments.length > 0) {
-      console.log(`[Auto-Reconciliation] Found ${orphanedPayments.length} orphaned payments`);
-      
-      for (const payment of orphanedPayments) {
-        try {
-          const result = await paymentService.verifyAndCreateOrder(payment.externalRef, shopService);
-          if (result.success && result.orderId) {
-            console.log(`[Auto-Reconciliation] Created order ${result.orderId} for payment ${payment.externalRef}`);
+    const orphanedPayments = await paymentService.getOrphanedSuccessfulPayments({
+      includeFailedRetries: true,
+      successOnly: true,
+      limit: 100,
+    });
+
+    if (orphanedPayments.length === 0) return;
+
+    console.log(`[Auto-Reconciliation] Found ${orphanedPayments.length} orphaned payments`);
+
+    let ordersCreated = 0;
+    let failed = 0;
+    let alreadyLinked = 0;
+    let clearedStale = 0;
+
+    for (const payment of orphanedPayments) {
+      try {
+        const result = await paymentService.verifyAndCreateOrder(
+          payment.externalRef,
+          shopService,
+        );
+
+        if (result.success && result.orderId) {
+          if (result.message === 'Order already exists') {
+            alreadyLinked++;
+          } else {
+            ordersCreated++;
+            console.log(
+              `[Auto-Reconciliation] Created order ${result.orderId} for ${payment.externalRef}`,
+            );
           }
-        } catch (err) {
-          console.error(`[Auto-Reconciliation] Failed for ${payment.externalRef}:`, err.message);
+        } else if (
+          result.status === 'failed' ||
+          result.status === 'abandoned'
+        ) {
+          clearedStale++;
+        } else {
+          failed++;
+          console.warn(
+            `[Auto-Reconciliation] No order for ${payment.externalRef}: ${result.error || result.status || 'unknown'}`,
+          );
         }
+      } catch (err) {
+        failed++;
+        console.error(
+          `[Auto-Reconciliation] Failed for ${payment.externalRef}:`,
+          err.message,
+        );
       }
     }
+
+    console.log(
+      `[Auto-Reconciliation] Done: ${ordersCreated} created, ${alreadyLinked} already linked, ${clearedStale} stale cleared, ${failed} failed`,
+    );
   } catch (error) {
     console.error('[Auto-Reconciliation] Error:', error.message);
   }
@@ -243,6 +281,14 @@ const reconcileOrphanedPayments = async () => {
 
 setInterval(reconcileOrphanedPayments, 5 * 60 * 1000);
 setTimeout(reconcileOrphanedPayments, 30 * 1000);
+
+const cleanupStaleCheckouts = () =>
+  paymentService.cleanupStalePaymentAttempts(shopService, { limit: 30 }).catch((err) => {
+    console.error('[Payment Cleanup] Error:', err.message);
+  });
+
+setInterval(cleanupStaleCheckouts, 60 * 60 * 1000);
+setTimeout(cleanupStaleCheckouts, 5 * 60 * 1000);
 
 // Auto-delete completed shop orders after 72 hours
 const prisma = require('./config/db');
