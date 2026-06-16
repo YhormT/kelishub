@@ -1,11 +1,64 @@
 const prisma = require("../config/db");
 
 class SmsService {
+  // Parse SMS message to extract reference and amount
+  parseSmsMessage(message) {
+    const text = String(message || '');
+
+    const amountPatterns = [
+      /Payment received for GHS\s*([\d,]+\.?\d*)/i,
+      /You have received GHS\s*([\d,]+\.?\d*)/i,
+      /received(?:\s+an amount of)?\s+GHS\s*([\d,]+\.?\d*)/i,
+      /(?:GH¢|GHc)\s*([\d,]+\.?\d*)/i,
+    ];
+
+    const transactionIdPatterns = [
+      /Transaction\s*(?:ID|Id|id|No\.?|#)?\s*:?\s*(\d{8,15})/i,
+      /Txn\s*(?:ID|Id|id|No\.?)?\s*:?\s*(\d{8,15})/i,
+      /Trans(?:action)?\s*(?:ID|Id|id|No\.?)?\s*:?\s*(\d{8,15})/i,
+    ];
+
+    let amount = null;
+    for (const pattern of amountPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        amount = parseFloat(match[1].replace(/,/g, ''));
+        if (!Number.isNaN(amount)) break;
+        amount = null;
+      }
+    }
+
+    let reference = null;
+    for (const pattern of transactionIdPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        reference = match[1];
+        break;
+      }
+    }
+
+    return { amount, reference };
+  }
+
   // Save SMS message to database
   async saveSmsMessage(phoneNumber, message) {
     try {
       const parsedData = this.parseSmsMessage(message);
-      
+
+      const isPaymentSms =
+        /payment received|you have received/i.test(String(message || ''));
+
+      if (isPaymentSms && (!parsedData.reference || !parsedData.amount)) {
+        console.warn(
+          '[SMS] Payment SMS saved with missing parsed fields:',
+          JSON.stringify({
+            reference: parsedData.reference,
+            amount: parsedData.amount,
+            preview: String(message).slice(0, 160),
+          }),
+        );
+      }
+
       const smsRecord = await prisma.smsMessage.create({
         data: {
           phoneNumber: phoneNumber,
@@ -15,55 +68,14 @@ class SmsService {
           isProcessed: false
         }
       });
-      
+
       return smsRecord;
     } catch (error) {
       console.error("Error saving SMS:", error);
       throw new Error(`Failed to save SMS: ${error.message}`);
     }
   }
-  
-  // Parse SMS message to extract reference and amount
-  parseSmsMessage(message) {
-    // Updated patterns for multiple SMS formats
-    const patterns = {
-      // Pattern for "Payment received for GHS X.XX"
-      amountPattern1: /Payment received for GHS\s*([\d,]+\.?\d*)/i,
-      // Pattern for "You have received GHS X.XX"
-      amountPattern2: /You have received GHS\s*([\d,]+\.?\d*)/i,
-      // Pattern for "Transaction ID: XXXXXXXXXX"
-      transactionId: /Transaction ID:\s*(\d+)/i
-    };
-    
-    const amountMatch1 = message.match(patterns.amountPattern1);
-    const amountMatch2 = message.match(patterns.amountPattern2);
-    const transactionIdMatch = message.match(patterns.transactionId);
-    
-    // Try both patterns to find amount
-    let amount = null;
-    let amountMatch = null;
-    
-    if (amountMatch1) {
-      amountMatch = amountMatch1;
-      amount = parseFloat(amountMatch1[1].replace(',', ''));
-    } else if (amountMatch2) {
-      amountMatch = amountMatch2;
-      amount = parseFloat(amountMatch2[1].replace(',', ''));
-    }
-    
-    // Log for debugging
-    console.log('Parsing SMS:', message);
-    console.log('Amount match (Pattern 1):', amountMatch1);
-    console.log('Amount match (Pattern 2):', amountMatch2);
-    console.log('Final amount:', amount);
-    console.log('Transaction ID match:', transactionIdMatch);
-    
-    return {
-      amount: amount,
-      reference: transactionIdMatch ? transactionIdMatch[1] : null // Transaction ID goes to reference column
-    };
-  }
-  
+
   // Get unprocessed SMS messages
   async getUnprocessedSms() {
     try {
@@ -105,12 +117,22 @@ class SmsService {
       });
       if (sms) return sms;
 
-      // 3. Try searching the raw message text for the reference
+      // 3. Try searching the raw message text (amount required for credit)
       sms = await prisma.smsMessage.findFirst({
         where: {
           message: { contains: cleanRef },
           isProcessed: false,
           amount: { not: null }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+      if (sms) return sms;
+
+      // 4. Message contains ref but amount failed to parse at ingest — recover at verify time
+      sms = await prisma.smsMessage.findFirst({
+        where: {
+          message: { contains: cleanRef },
+          isProcessed: false,
         },
         orderBy: { createdAt: 'desc' }
       });
@@ -149,6 +171,13 @@ class SmsService {
           message: { contains: cleanRef },
           amount: { not: null }
         },
+        orderBy: { createdAt: 'desc' }
+      });
+      if (sms) return sms;
+
+      // 4. Message contains ref even if amount was not parsed at ingest
+      sms = await prisma.smsMessage.findFirst({
+        where: { message: { contains: cleanRef } },
         orderBy: { createdAt: 'desc' }
       });
       if (sms) return sms;

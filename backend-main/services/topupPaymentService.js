@@ -413,31 +413,63 @@ const verifyTransactionIdTopup = async (userId, referenceId, retries = 3) => {
     const cleanRef = String(referenceId).trim().replace(/[^a-zA-Z0-9]/g, '');
 
     // Step 1: Find SMS message regardless of processed status
-    const smsMessage = await smsService.findSmsByReferenceAny(cleanRef);
+    let smsMessage = await smsService.findSmsByReferenceAny(cleanRef);
 
     // Step 2: If not found at all → invalid ID (or SMS not ingested yet)
     if (!smsMessage) {
       const recentUnprocessed = await prisma.smsMessage.count({
         where: {
           isProcessed: false,
-          amount: { not: null },
           createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+          OR: [
+            { amount: { not: null } },
+            { message: { contains: 'Payment received' } },
+            { message: { contains: 'You have received' } },
+          ],
         },
       });
+
+      const lastReceivedSms = await prisma.smsMessage.findFirst({
+        where: {
+          OR: [
+            { message: { contains: 'Payment received' } },
+            { message: { contains: 'You have received' } },
+          ],
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true },
+      });
+
+      const lastSmsAgeMin = lastReceivedSms
+        ? Math.round((Date.now() - lastReceivedSms.createdAt.getTime()) / 60000)
+        : null;
 
       console.warn(
         `[Top-up TXN] No SMS match for userId=${userId} ref=${cleanRef}` +
           (recentUnprocessed > 0
             ? ` (${recentUnprocessed} unprocessed payment SMS in last 5 min — may still be syncing)`
-            : ''),
+            : lastSmsAgeMin != null
+              ? ` (no payment SMS ingested in last 5 min; last payment SMS was ${lastSmsAgeMin} min ago — check MoMo number / SMS forwarder)`
+              : ' (no payment SMS ever ingested — check SMS forwarder app)'),
       );
 
       const notFoundMsg =
         recentUnprocessed > 0
           ? 'Transaction ID not found yet. If you just sent payment, wait 1–2 minutes for the SMS to arrive, then try again.'
-          : 'Invalid transaction ID. Please check the transaction ID and try again.';
+          : 'Invalid transaction ID. Use the full MoMo Transaction ID (not Reference). Ensure payment was sent to the correct Kellishub MoMo number.';
 
       throw new Error(notFoundMsg);
+    }
+
+    // Re-parse amount from raw message if ingest parsing missed it
+    if (!smsMessage.amount && smsMessage.message) {
+      const reparsed = smsService.parseSmsMessage(smsMessage.message);
+      if (reparsed.amount) {
+        smsMessage = { ...smsMessage, amount: reparsed.amount };
+        if (!smsMessage.reference && reparsed.reference) {
+          smsMessage.reference = reparsed.reference;
+        }
+      }
     }
 
     // Step 3: If found but already processed → already used
