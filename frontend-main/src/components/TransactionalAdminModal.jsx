@@ -172,7 +172,7 @@ const TransactionalAdminModal = ({ isOpen, onClose }) => {
       const failed = res.data.failed ?? 0;
       await Swal.fire({
         title: created > 0 ? 'Orders recovered' : 'Reconcile finished',
-        html: `<p>Processed: <b>${processed}</b></p><p>Orders created: <b>${created}</b></p>${failed ? `<p class="text-amber-400">Failed: ${failed}</p>` : ''}`,
+        html: `<p>Processed: <b>${processed}</b></p><p>Orders created: <b>${created}</b></p>${failed ? `<p class="text-amber-400">Failed: ${failed}</p>` : ''}${res.data.remainingHint ? `<p class="text-dark-400 text-sm mt-2">${res.data.remainingHint}</p>` : ''}`,
         icon: created > 0 ? 'success' : 'info',
         background: '#1e293b',
         color: '#f1f5f9',

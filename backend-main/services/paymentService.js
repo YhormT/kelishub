@@ -408,13 +408,66 @@ const markOrderCreationAttempted = async (transactionId, success, errorMessage =
   });
 };
 
+// Create a shop order when the payment row is already SUCCESS (no Paystack round-trip).
+const createOrderFromSuccessfulTransaction = async (reference, shopService) => {
+  const existingTransaction = await prisma.paymentTransaction.findUnique({
+    where: { externalRef: reference },
+  });
+
+  if (!existingTransaction) {
+    return { success: false, error: 'Transaction not found' };
+  }
+
+  if (existingTransaction.orderId) {
+    return {
+      success: true,
+      message: 'Order already exists',
+      orderId: existingTransaction.orderId,
+    };
+  }
+
+  if (!existingTransaction.productId || !existingTransaction.mobileNumber) {
+    return { success: false, error: 'Missing product or mobile number' };
+  }
+
+  try {
+    const orderResult = await shopService.createShopOrderForTransaction(
+      reference,
+      existingTransaction.productId,
+      existingTransaction.mobileNumber
+    );
+
+    if (orderResult.created) {
+      await markOrderCreationAttempted(existingTransaction.id, true);
+      return {
+        success: true,
+        message: 'Order created',
+        orderId: orderResult.orderId,
+        mobileNumber: existingTransaction.mobileNumber,
+      };
+    }
+
+    if (orderResult.alreadyExists) {
+      return {
+        success: true,
+        message: 'Order already exists',
+        orderId: orderResult.orderId,
+        mobileNumber: existingTransaction.mobileNumber,
+      };
+    }
+
+    await markOrderCreationAttempted(existingTransaction.id, false, orderResult.error);
+    return { success: false, error: orderResult.error || 'Order creation failed' };
+  } catch (orderError) {
+    await markOrderCreationAttempted(existingTransaction.id, false, orderError.message);
+    return { success: false, error: 'Order creation failed', details: orderError.message };
+  }
+};
+
 // Verify payment directly with Paystack and create order if successful
 const verifyAndCreateOrder = async (reference, shopService) => {
-  console.log('[Payment Reconciliation] Processing reference:', reference);
-  
-  // First check if transaction exists and already has an order
   const existingTransaction = await prisma.paymentTransaction.findUnique({
-    where: { externalRef: reference }
+    where: { externalRef: reference },
   });
 
   if (!existingTransaction) {
@@ -425,7 +478,12 @@ const verifyAndCreateOrder = async (reference, shopService) => {
     return { success: true, message: 'Order already exists', orderId: existingTransaction.orderId };
   }
 
-  // Verify with Paystack
+  // Already marked paid locally — create the shop order without calling Paystack again.
+  if (existingTransaction.status === 'SUCCESS') {
+    return createOrderFromSuccessfulTransaction(reference, shopService);
+  }
+
+  // Verify with Paystack (stale INITIALIZED / PENDING rows)
   try {
     const response = await axios({
       method: 'GET',
@@ -475,42 +533,18 @@ const verifyAndCreateOrder = async (reference, shopService) => {
     // webhook and verify endpoints. This guarantees one charge → one order,
     // even if reconciliation races with an in-flight webhook/verify.
     if (existingTransaction.productId && existingTransaction.mobileNumber) {
-      try {
-        const orderResult = await shopService.createShopOrderForTransaction(
-          reference,
-          existingTransaction.productId,
-          existingTransaction.mobileNumber
-        );
-
-        if (orderResult.created) {
-          console.log('[Payment Reconciliation] Order created:', orderResult.orderId);
-          return {
-            success: true,
-            message: 'Payment verified and order created',
-            orderId: orderResult.orderId,
-            mobileNumber: existingTransaction.mobileNumber
-          };
-        }
-
-        if (orderResult.alreadyExists) {
-          return {
-            success: true,
-            message: 'Order already exists',
-            orderId: orderResult.orderId,
-            mobileNumber: existingTransaction.mobileNumber
-          };
-        }
-
-        await markOrderCreationAttempted(existingTransaction.id, false, orderResult.error);
-        return { success: false, error: orderResult.error || 'Order creation failed' };
-      } catch (orderError) {
-        console.error('[Payment Reconciliation] Order creation failed:', orderError);
-        await markOrderCreationAttempted(existingTransaction.id, false, orderError.message);
-        return { success: false, error: 'Order creation failed', details: orderError.message };
+      const orderResult = await createOrderFromSuccessfulTransaction(reference, shopService);
+      if (orderResult.success && orderResult.orderId) {
+        return {
+          success: true,
+          message: 'Payment verified and order created',
+          orderId: orderResult.orderId,
+          mobileNumber: existingTransaction.mobileNumber,
+        };
       }
-    } else {
-      return { success: false, error: 'Missing product or mobile number' };
+      return orderResult;
     }
+    return { success: false, error: 'Missing product or mobile number' };
 
   } catch (error) {
     console.error('[Payment Reconciliation] Verification error:', error.message);

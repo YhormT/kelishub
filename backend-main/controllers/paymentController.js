@@ -382,10 +382,16 @@ const getAllTransactions = async (req, res) => {
   }
 };
 
-// Reconcile orphaned payments - process successful payments without orders
+// Reconcile orphaned payments — create shop orders only (no GMPL export).
 const reconcilePayments = async (req, res) => {
   try {
     console.log("[Payment Reconciliation] Starting manual reconciliation...");
+
+    const orphanedPayments =
+      await paymentService.getOrphanedSuccessfulPayments({
+        includeFailedRetries: true,
+        limit: 100,
+      });
 
     const results = {
       processed: 0,
@@ -394,80 +400,57 @@ const reconcilePayments = async (req, res) => {
       details: [],
     };
 
-    // Process in batches until none left (cap total to avoid request timeout).
-    const MAX_TOTAL = 300;
-    for (;;) {
-      const orphanedPayments =
-        await paymentService.getOrphanedSuccessfulPayments({
-          includeFailedRetries: true,
-          limit: 50,
-        });
-      if (!orphanedPayments.length) break;
-      console.log(
-        `[Payment Reconciliation] Batch of ${orphanedPayments.length} orphaned payment(s)`,
-      );
+    for (const payment of orphanedPayments) {
+      try {
+        const result = await paymentService.verifyAndCreateOrder(
+          payment.externalRef,
+          shopService,
+        );
+        results.processed++;
 
-      for (const payment of orphanedPayments) {
-        if (results.processed >= MAX_TOTAL) break;
-        try {
-          const result = await paymentService.verifyAndCreateOrder(
-            payment.externalRef,
-            shopService,
-          );
-          results.processed++;
-
-          if (result.success && result.orderId) {
-            results.ordersCreated++;
-            results.details.push({
-              reference: payment.externalRef,
-              status: "success",
-              orderId: result.orderId,
-            });
-            try {
-              const order = await prisma.order.findUnique({
-                where: { id: result.orderId },
-                include: { items: true },
-              });
-              if (order) notifyPendingOrderCreated({ created: true, order });
-            } catch (_) {
-              /* GMPL notify is best-effort */
-            }
-          } else if (
-            result.success &&
-            result.message === "Order already exists"
-          ) {
-            results.details.push({
-              reference: payment.externalRef,
-              status: "already_exists",
-              orderId: result.orderId,
-            });
-          } else {
-            results.failed++;
-            results.details.push({
-              reference: payment.externalRef,
-              status: "failed",
-              error: result.error,
-            });
-          }
-        } catch (error) {
+        if (result.success && result.orderId) {
+          results.ordersCreated++;
+          results.details.push({
+            reference: payment.externalRef,
+            status: "success",
+            orderId: result.orderId,
+          });
+        } else if (
+          result.success &&
+          result.message === "Order already exists"
+        ) {
+          results.details.push({
+            reference: payment.externalRef,
+            status: "already_exists",
+            orderId: result.orderId,
+          });
+        } else {
           results.failed++;
           results.details.push({
             reference: payment.externalRef,
-            status: "error",
-            error: error.message,
+            status: "failed",
+            error: result.error,
           });
         }
+      } catch (error) {
+        results.failed++;
+        results.details.push({
+          reference: payment.externalRef,
+          status: "error",
+          error: error.message,
+        });
       }
-
-      if (results.processed >= MAX_TOTAL) break;
-      if (orphanedPayments.length < 50) break;
     }
 
     console.log("[Payment Reconciliation] Complete:", results);
 
     res.json({
       success: true,
-      message: `Reconciliation complete. Created ${results.ordersCreated} order(s) from ${results.processed} payment(s).`,
+      message: `Created ${results.ordersCreated} shop order(s) from ${results.processed} payment(s). Run again if more remain.`,
+      remainingHint:
+        orphanedPayments.length >= 100
+          ? "More orphaned payments may remain — click Recover again."
+          : undefined,
       ...results,
     });
   } catch (error) {
